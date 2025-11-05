@@ -19,7 +19,7 @@ def get_future_data(future_code, start_date=None, end_date=None, save_to_csv=Tru
     - use_cache: 是否使用缓存，默认为True
     
     返回:
-    - DataFrame: 包含期货历史数据的数据框
+    - DataFrame: 包含期货历史数据的数据框--
     """
     
     # 设置默认日期范围（过去3年）
