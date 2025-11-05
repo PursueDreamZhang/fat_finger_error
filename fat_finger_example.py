@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-期货"乌龙指"异常交易识别示例 - 重构版
+期货"乌龙指"异常交易识别示例 - 基于历史统计的检测版
 
-本示例展示如何使用重构后的FatFingerDetector类检测乌龙指事件。
-新方案通过比较目标期货品种与多个其他期货品种在过去20天内的最高价和最低价差值，
-当差值超出预设范围时，系统判定为发生了乌龙指事件。
+本示例展示如何使用基于历史统计的FatFingerDetector类检测乌龙指事件。
+新方案通过计算目标期货品种与参考品种当天的最高价和最低价差值，
+然后将两者差值与历史平均水平进行比较，当差值显著大于历史平均水平时判定为乌龙指。
 """
 
 import pandas as pd
@@ -19,10 +19,10 @@ from fat_finger_detector import FatFingerDetector
 
 def main():
     """
-    主函数：演示如何使用重构后的FatFingerDetector检测乌龙指事件
+    主函数：演示如何使用基于历史统计的FatFingerDetector检测乌龙指事件
     """
     print("=" * 60)
-    print("期货乌龙指检测系统 - 重构版示例")
+    print("期货乌龙指检测系统 - 基于历史统计的检测版示例")
     print("=" * 60)
     print()
     
@@ -33,7 +33,7 @@ def main():
     target_code = "CU2404"  # 目标期货品种代码（沪铜2404合约）
     reference_codes = ["CU2405", "CU2403", "CU0"]  # 参考期货品种代码列表
     threshold_pct = 50.0  # 价格差值差异阈值（百分比）
-    window = 20  # 计算窗口（天数）
+    window = 20  # 历史统计窗口（天数）
     
     # 设置日期范围（使用固定日期范围测试）
     end_date = "20231231"  # 固定结束日期
@@ -42,8 +42,13 @@ def main():
     print(f"目标品种: {target_code}")
     print(f"参考品种: {', '.join(reference_codes)}")
     print(f"检测阈值: {threshold_pct}%")
-    print(f"计算窗口: {window}天")
+    print(f"历史统计窗口: {window}天")
     print(f"数据范围: {start_date} 至 {end_date}")
+    print()
+    print("检测逻辑说明：")
+    print("1. 计算目标品种和参考品种当天的最高价与最低价差值")
+    print("2. 计算两者差值，并与历史平均水平进行比较")
+    print("3. 当差值显著大于历史平均水平时，判定为乌龙指事件")
     print()
     
     # 3. 检测乌龙指事件
@@ -126,41 +131,41 @@ def test_with_different_parameters():
             "reference_codes": ["CU2405", "AL2404", "ZN2404"],
             "threshold_pct": 30.0,
             "window": 20,
-            "description": "低阈值测试"
+            "description": "低阈值测试 - 更容易检测到异常"
         },
         {
             "target_code": "CU2404",
             "reference_codes": ["CU2405", "AL2404", "ZN2404"],
             "threshold_pct": 70.0,
             "window": 20,
-            "description": "高阈值测试"
+            "description": "高阈值测试 - 只检测显著异常"
         },
         {
             "target_code": "CU2404",
             "reference_codes": ["CU2405", "AL2404", "ZN2404"],
             "threshold_pct": 50.0,
             "window": 10,
-            "description": "短窗口测试"
+            "description": "短历史窗口测试 - 基于近期历史数据"
         },
         {
             "target_code": "AL2404",
             "reference_codes": ["AL2405", "CU2404", "ZN2404"],
             "threshold_pct": 50.0,
             "window": 20,
-            "description": "不同目标品种测试"
+            "description": "不同目标品种测试 - 铝期货"
         }
     ]
     
-    # 设置日期范围
-    end_date = datetime.now().strftime('%Y%m%d')
-    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+    # 设置日期范围（使用历史日期）
+    end_date = "20231231"  # 固定结束日期
+    start_date = "20231101"  # 固定开始日期
     
     for i, test_case in enumerate(test_cases, 1):
         print(f"\n测试案例 {i}: {test_case['description']}")
         print(f"目标品种: {test_case['target_code']}")
         print(f"参考品种: {', '.join(test_case['reference_codes'])}")
         print(f"阈值: {test_case['threshold_pct']}%")
-        print(f"窗口: {test_case['window']}天")
+        print(f"历史统计窗口: {test_case['window']}天")
         
         # 检测乌龙指事件
         full_data, events_data = detector.detect_fat_finger_events(
@@ -178,6 +183,13 @@ def test_with_different_parameters():
             print("结果: 未检测到乌龙指事件")
         else:
             print(f"结果: 检测到 {len(events_data)} 起潜在的乌龙指事件")
+            
+            # 显示最近的异常事件详情
+            if not events_data.empty:
+                latest_event = events_data.iloc[-1]
+                print(f"最新异常事件日期: {latest_event['date'].strftime('%Y-%m-%d')}")
+                if 'anomaly_reasons' in latest_event:
+                    print(f"异常原因: {latest_event['anomaly_reasons']}")
 
 def analyze_price_spread_patterns():
     """
@@ -193,9 +205,9 @@ def analyze_price_spread_patterns():
     # 要分析的期货品种
     future_codes = ["CU2404", "CU2405", "AL2404", "AL2405", "ZN2404", "ZN2405"]
     
-    # 设置日期范围
-    end_date = datetime.now().strftime('%Y%m%d')
-    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+    # 设置日期范围（使用历史日期）
+    end_date = "20231231"  # 固定结束日期
+    start_date = "20231101"  # 固定开始日期
     
     # 存储各品种的价格差值数据
     spread_data = {}
@@ -212,7 +224,7 @@ def analyze_price_spread_patterns():
         )
         
         if data is not None and not data.empty:
-            # 计算价格差值
+            # 计算当天价格差值
             data = detector.calculate_price_spread(data, window=20)
             spread_data[code] = data
             print(f"获取到 {len(data)} 天的数据")
@@ -221,10 +233,10 @@ def analyze_price_spread_patterns():
     
     # 分析价格差值统计特征
     if spread_data:
-        print("\n价格差值统计特征:")
-        print("-" * 40)
+        print("\n当天价格差值统计特征:")
+        print("-" * 50)
         print(f"{'品种代码':<10} {'平均差值':<10} {'最大差值':<10} {'最小差值':<10} {'标准差':<10}")
-        print("-" * 40)
+        print("-" * 50)
         
         for code, data in spread_data.items():
             avg_spread = data['price_spread'].mean()
@@ -233,13 +245,49 @@ def analyze_price_spread_patterns():
             std_spread = data['price_spread'].std()
             
             print(f"{code:<10} {avg_spread:<10.2f} {max_spread:<10.2f} {min_spread:<10.2f} {std_spread:<10.2f}")
+        
+        # 进一步分析品种间的差值差异模式
+        print("\n品种间差值差异分析:")
+        print("-" * 50)
+        
+        # 选择目标品种和参考品种进行分析
+        target_code = "CU2404"
+        reference_codes = ["CU2405", "AL2404", "ZN2404"]
+        
+        if target_code in spread_data:
+            for ref_code in reference_codes:
+                if ref_code in spread_data:
+                    # 合并数据
+                    merged_data = pd.merge(
+                        spread_data[target_code][['date', 'price_spread']],
+                        spread_data[ref_code][['date', 'price_spread']],
+                        on='date',
+                        suffixes=(f'_{target_code}', f'_{ref_code}')
+                    )
+                    
+                    # 计算差值差异
+                    merged_data['spread_diff'] = (
+                        merged_data[f'price_spread_{target_code}'] - merged_data[f'price_spread_{ref_code}']
+                    )
+                    
+                    # 分析统计特征
+                    avg_diff = merged_data['spread_diff'].mean()
+                    std_diff = merged_data['spread_diff'].std()
+                    max_diff = merged_data['spread_diff'].max()
+                    min_diff = merged_data['spread_diff'].min()
+                    
+                    print(f"{target_code} vs {ref_code}:")
+                    print(f"  平均差值差异: {avg_diff:.2f} ± {std_diff:.2f}")
+                    print(f"  最大差值差异: {max_diff:.2f}")
+                    print(f"  最小差值差异: {min_diff:.2f}")
+                    print()
 
 if __name__ == "__main__":
     # 运行主示例
     main()
     
     # 测试不同参数
-    #test_with_different_parameters()
+    test_with_different_parameters()
     
     # 分析价格差值模式
-    #analyze_price_spread_patterns()
+    analyze_price_spread_patterns()

@@ -324,8 +324,8 @@ class FatFingerDetector:
         
         参数:
         - data: 期货数据DataFrame
-        - window: 计算窗口，默认为20天
-        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与滑动窗口计算
+        - window: 计算窗口，默认为20天（此参数保留以保持向后兼容性）
+        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与计算
         
         返回:
         - DataFrame: 包含价格差值的数据
@@ -350,21 +350,264 @@ class FatFingerDetector:
         else:
             df['to_exclude'] = False
         
-        # 计算滚动窗口内的最高价和最低价，排除指定日期的数据
-        # 使用自定义函数计算滚动窗口，排除特定日期
-        df['rolling_high'] = self._calculate_rolling_max(df['high'], window, df['to_exclude'])
-        df['rolling_low'] = self._calculate_rolling_min(df['low'], window, df['to_exclude'])
-        
-        # 计算价格差值
-        df['price_spread'] = df['rolling_high'] - df['rolling_low']
+        # 计算当天的价格差值（最高价-最低价）
+        df['price_spread'] = df['high'] - df['low']
         
         # 计算价格差值相对于最低价的百分比
-        df['price_spread_pct'] = (df['price_spread'] / df['rolling_low']) * 100
+        df['price_spread_pct'] = (df['price_spread'] / df['low']) * 100
         
         # 删除临时列
-        df.drop('to_exclude', axis=1, inplace=True)
+        if 'to_exclude' in df.columns:
+            df.drop('to_exclude', axis=1, inplace=True)
         
         return df
+    
+    def calculate_all_spread_differences(self, target_data, reference_data_dict, target_code, reference_codes, exclude_dates=None):
+        """
+        计算目标品种与所有参考品种的当天价格差值差异
+        
+        参数:
+        - target_data: 目标品种数据DataFrame
+        - reference_data_dict: 参考品种数据字典，键为品种代码，值为DataFrame
+        - target_code: 目标品种代码
+        - reference_codes: 参考品种代码列表
+        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与计算
+        
+        返回:
+        - DataFrame: 包含价格差值差异的数据
+        """
+        # 计算目标品种的价格差值
+        target_spread = self.calculate_price_spread(target_data, exclude_dates=exclude_dates)
+        
+        # 从目标品种的价格差值开始
+        merged_data = target_spread[['date', 'price_spread', 'price_spread_pct']].copy()
+        merged_data.rename(columns={
+            'price_spread': f'{target_code}_spread',
+            'price_spread_pct': f'{target_code}_spread_pct'
+        }, inplace=True)
+        
+        # 为每个参考品种计算差值差异并合并
+        for ref_code in reference_codes:
+            if ref_code in reference_data_dict:
+                # 计算参考品种的价格差值
+                ref_spread = self.calculate_price_spread(reference_data_dict[ref_code], exclude_dates=exclude_dates)
+                
+                # 合并目标品种和参考品种的数据
+                temp_data = pd.merge(
+                    merged_data[['date', f'{target_code}_spread']],
+                    ref_spread[['date', 'price_spread']],
+                    on='date',
+                    how='inner'
+                )
+                
+                # 计算差值差异
+                temp_data[f'spread_diff_{target_code}_{ref_code}'] = (
+                    temp_data[f'{target_code}_spread'] - temp_data['price_spread']
+                )
+                
+                # 计算差值差异的绝对值
+                temp_data[f'spread_diff_abs_{target_code}_{ref_code}'] = temp_data[f'spread_diff_{target_code}_{ref_code}'].abs()
+                
+                # 将差值差异合并到主数据中
+                if f'spread_diff_{target_code}_{ref_code}' not in merged_data.columns:
+                    merged_data = pd.merge(
+                        merged_data,
+                        temp_data[['date', f'spread_diff_{target_code}_{ref_code}', f'spread_diff_abs_{target_code}_{ref_code}']],
+                        on='date',
+                        how='left'
+                    )
+                    
+                    # 将NaN值替换为0，表示没有参考品种数据时差值差异为0
+                    merged_data[f'spread_diff_{target_code}_{ref_code}'].fillna(0, inplace=True)
+                    merged_data[f'spread_diff_abs_{target_code}_{ref_code}'].fillna(0, inplace=True)
+        
+        return merged_data
+    
+    def calculate_daily_spread_difference(self, target_data, reference_data, target_code, reference_code, exclude_dates=None):
+        """
+        计算目标品种与参考品种的当天价格差值差异
+        
+        参数:
+        - target_data: 目标品种数据DataFrame
+        - reference_data: 参考品种数据DataFrame
+        - target_code: 目标品种代码
+        - reference_code: 参考品种代码
+        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与计算
+        
+        返回:
+        - DataFrame: 包含价格差值差异的数据
+        """
+        # 计算目标品种和参考品种的价格差值
+        target_spread = self.calculate_price_spread(target_data, exclude_dates=exclude_dates)
+        reference_spread = self.calculate_price_spread(reference_data, exclude_dates=exclude_dates)
+        
+        # 合并数据
+        merged_data = pd.merge(
+            target_spread[['date', 'price_spread', 'price_spread_pct']],
+            reference_spread[['date', 'price_spread', 'price_spread_pct']],
+            on='date',
+            how='inner',
+            suffixes=(f'_{target_code}', f'_{reference_code}')
+        )
+        
+        # 计算差值差异
+        merged_data[f'spread_diff_{target_code}_{reference_code}'] = (
+            merged_data[f'price_spread_{target_code}'] - merged_data[f'price_spread_{reference_code}']
+        )
+        
+        # 计算差值差异的绝对值
+        merged_data[f'spread_diff_abs_{target_code}_{reference_code}'] = (
+            merged_data[f'spread_diff_{target_code}_{reference_code}'].abs()
+        )
+        
+        return merged_data
+    
+    def calculate_historical_spread_difference_stats(self, spread_diff_data, window=20, exclude_dates=None):
+        """
+        计算历史差值差异的统计特征
+        
+        参数:
+        - spread_diff_data: 包含价格差值差异的DataFrame
+        - window: 计算历史统计特征的窗口，默认为20天
+        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与历史统计计算
+        
+        返回:
+        - DataFrame: 包含历史统计特征的数据
+        """
+        df = spread_diff_data.copy()
+        
+        # 确保数据按日期排序
+        df = df.sort_values('date')
+        
+        # 如果提供了排除日期列表，将这些日期的数据标记为需要排除
+        if exclude_dates is not None:
+            # 将exclude_dates转换为datetime类型（如果是字符串）
+            exclude_dates_dt = []
+            for date in exclude_dates:
+                if isinstance(date, str):
+                    exclude_dates_dt.append(pd.to_datetime(date))
+                else:
+                    exclude_dates_dt.append(date)
+            
+            # 标记需要排除的日期
+            df['to_exclude'] = df['date'].isin(exclude_dates_dt)
+        else:
+            df['to_exclude'] = False
+        
+        # 找出所有差值差异列
+        spread_diff_cols = [col for col in df.columns if 'spread_diff_' in col and 'abs' not in col]
+        
+        # 为每个差值差异列计算历史统计特征
+        for col in spread_diff_cols:
+            # 计算滚动窗口内的平均值
+            df[f'{col}_hist_mean'] = self._calculate_rolling_mean(df[col], window, df['to_exclude'])
+            
+            # 计算滚动窗口内的标准差
+            df[f'{col}_hist_std'] = self._calculate_rolling_std(df[col], window, df['to_exclude'])
+            
+            # 计算当前值与历史平均值的差异倍数（Z-score）
+            # 避免除以0和NaN的情况
+            hist_std = df[f'{col}_hist_std'].copy()
+            hist_mean = df[f'{col}_hist_mean'].copy()
+            
+            # 处理历史平均值为NaN的情况
+            valid_mask = ~(hist_mean.isna() | hist_std.isna())
+            
+            # 只对有效数据计算Z-score
+            df[f'{col}_zscore'] = np.nan
+            
+            # 对于标准差为0或接近0的情况，Z-score设为0（表示没有变化）
+            zero_std_mask = valid_mask & (hist_std < 1e-10)
+            df.loc[zero_std_mask, f'{col}_zscore'] = 0.0
+            
+            # 对于标准差有效的情况，正常计算Z-score
+            normal_std_mask = valid_mask & (hist_std >= 1e-10)
+            df.loc[normal_std_mask, f'{col}_zscore'] = (df.loc[normal_std_mask, col] - df.loc[normal_std_mask, f'{col}_hist_mean']) / df.loc[normal_std_mask, f'{col}_hist_std']
+            
+            # 计算当前值与历史平均值的绝对差异
+            df[f'{col}_abs_diff_from_mean'] = (df[col] - df[f'{col}_hist_mean']).abs()
+            
+            # 计算当前值相对于历史平均值的百分比差异
+            # 避免除以0和NaN的情况
+            hist_mean_abs = df[f'{col}_hist_mean'].abs()
+            
+            # 处理历史平均值为NaN的情况
+            valid_mask = ~hist_mean_abs.isna()
+            
+            # 只对有效数据计算百分比差异
+            df[f'{col}_pct_diff_from_mean'] = np.nan
+            
+            # 对于历史平均值为0或接近0的情况，百分比差异设为0（表示没有变化）
+            zero_mean_mask = valid_mask & (hist_mean_abs < 1e-10)
+            df.loc[zero_mean_mask, f'{col}_pct_diff_from_mean'] = 0.0
+            
+            # 对于历史平均值有效的情况，正常计算百分比差异
+            normal_mean_mask = valid_mask & (hist_mean_abs >= 1e-10)
+            df.loc[normal_mean_mask, f'{col}_pct_diff_from_mean'] = (df.loc[normal_mean_mask, f'{col}_abs_diff_from_mean'] / hist_mean_abs[normal_mean_mask]) * 100
+        
+        # 删除临时列
+        if 'to_exclude' in df.columns:
+            df.drop('to_exclude', axis=1, inplace=True)
+        
+        return df
+    
+    def _calculate_rolling_mean(self, series, window, exclude_mask):
+        """
+        计算滚动窗口平均值，排除指定日期的数据
+        
+        参数:
+        - series: 数据序列
+        - window: 窗口大小
+        - exclude_mask: 布尔掩码，True表示需要排除的日期
+        
+        返回:
+        - Series: 计算结果
+        """
+        result = []
+        for i in range(len(series)):
+            # 确定窗口范围
+            start_idx = max(0, i - window + 1)
+            end_idx = i + 1
+            
+            # 获取窗口内的数据，排除指定日期
+            window_data = series[start_idx:end_idx][~exclude_mask[start_idx:end_idx]]
+            
+            # 如果窗口内没有有效数据，使用0
+            if len(window_data) == 0:
+                result.append(0.0)
+            else:
+                result.append(window_data.mean())
+        
+        return pd.Series(result, index=series.index)
+    
+    def _calculate_rolling_std(self, series, window, exclude_mask):
+        """
+        计算滚动窗口标准差，排除指定日期的数据
+        
+        参数:
+        - series: 数据序列
+        - window: 窗口大小
+        - exclude_mask: 布尔掩码，True表示需要排除的日期
+        
+        返回:
+        - Series: 计算结果
+        """
+        result = []
+        for i in range(len(series)):
+            # 确定窗口范围
+            start_idx = max(0, i - window + 1)
+            end_idx = i + 1
+            
+            # 获取窗口内的数据，排除指定日期
+            window_data = series[start_idx:end_idx][~exclude_mask[start_idx:end_idx]]
+            
+            # 如果窗口内没有有效数据或只有一个数据点，使用0
+            if len(window_data) <= 1:
+                result.append(0.0)
+            else:
+                result.append(window_data.std())
+        
+        return pd.Series(result, index=series.index)
     
     def _calculate_rolling_max(self, series, window, exclude_mask):
         """
@@ -387,9 +630,9 @@ class FatFingerDetector:
             # 获取窗口内的数据，排除指定日期
             window_data = series[start_idx:end_idx][~exclude_mask[start_idx:end_idx]]
             
-            # 如果窗口内没有有效数据，使用NaN
+            # 如果窗口内没有有效数据，使用0.0
             if len(window_data) == 0:
-                result.append(np.nan)
+                result.append(0.0)
             else:
                 result.append(window_data.max())
         
@@ -416,9 +659,9 @@ class FatFingerDetector:
             # 获取窗口内的数据，排除指定日期
             window_data = series[start_idx:end_idx][~exclude_mask[start_idx:end_idx]]
             
-            # 如果窗口内没有有效数据，使用NaN
+            # 如果窗口内没有有效数据，使用0.0
             if len(window_data) == 0:
-                result.append(np.nan)
+                result.append(0.0)
             else:
                 result.append(window_data.min())
         
@@ -435,7 +678,7 @@ class FatFingerDetector:
         - start_date: 开始日期，格式为 'YYYYMMDD'，默认为60天前
         - end_date: 结束日期，格式为 'YYYYMMDD'，默认为今天
         - threshold_pct: 价格差值差异阈值（百分比），默认为50%
-        - window: 计算窗口，默认为20天
+        - window: 计算历史统计特征的窗口，默认为20天
         - save_to_csv: 是否保存结果到CSV，默认为True
         - max_iterations: 最大迭代次数，默认为3次
         
@@ -494,58 +737,53 @@ class FatFingerDetector:
             print(f"\n--- 第 {iteration + 1} 次迭代检测 ---")
             print(f"当前排除的乌龙指日期数量: {len(exclude_dates)}")
             
-            # 计算目标品种的价格差值（排除已识别的乌龙指日期）
-            target_data_spread = self.calculate_price_spread(
-                target_data, window=window, exclude_dates=exclude_dates
+            # 计算目标品种与所有参考品种的当天价格差值差异
+            daily_spread_diff = self.calculate_all_spread_differences(
+                target_data, reference_data, target_code, reference_codes, exclude_dates=exclude_dates
             )
             
-            # 计算参考品种的价格差值（排除已识别的乌龙指日期）
-            reference_data_spread = {}
-            for ref_code, ref_data in reference_data.items():
-                reference_data_spread[ref_code] = self.calculate_price_spread(
-                    ref_data, window=window, exclude_dates=exclude_dates
-                )
+            # 计算历史差值差异的统计特征
+            daily_spread_diff_stats = self.calculate_historical_spread_difference_stats(
+                daily_spread_diff, window=window, exclude_dates=exclude_dates
+            )
             
-            # 合并所有品种的数据
-            merged_data = target_data_spread[['date', 'price_spread', 'price_spread_pct']].copy()
-            merged_data.rename(columns={
-                'price_spread': f'{target_code}_spread',
-                'price_spread_pct': f'{target_code}_spread_pct'
-            }, inplace=True)
+            # 基于历史统计特征标记异常事件
+            merged_data = daily_spread_diff_stats.copy()
             
-            for ref_code, ref_data_spread in reference_data_spread.items():
-                merged_data = pd.merge(
-                    merged_data,
-                    ref_data_spread[['date', 'price_spread', 'price_spread_pct']],
-                    on='date',
-                    how='left',
-                    suffixes=('', f'_{ref_code}')
-                )
-                merged_data.rename(columns={
-                    'price_spread': f'{ref_code}_spread',
-                    'price_spread_pct': f'{ref_code}_spread_pct'
-                }, inplace=True)
+            # 找出所有差值差异列（只包含基础列名，不包含统计特征列）
+            spread_diff_cols = [col for col in merged_data.columns 
+                               if 'spread_diff_' in col and 'abs' not in col 
+                               and '_hist_mean' not in col and '_hist_std' not in col 
+                               and '_zscore' not in col and '_pct_diff_from_mean' not in col 
+                               and '_abs_diff_from_mean' not in col]
             
-            # 计算目标品种与各参考品种的差值差异
-            for ref_code in reference_data.keys():
-                # 计算绝对差值差异
-                merged_data[f'diff_abs_{ref_code}'] = (
-                    merged_data[f'{target_code}_spread'] - merged_data[f'{ref_code}_spread']
-                )
+            # 为每个差值差异列标记异常事件
+            for col in spread_diff_cols:
+                # 方法1：基于Z-score的异常检测（当前值与历史平均值的差异倍数）
+                merged_data[f'is_anomaly_zscore_{col}'] = merged_data[f'{col}_zscore'].abs() > 2.0
                 
-                # 计算相对差值差异（百分比）
-                merged_data[f'diff_pct_{ref_code}'] = (
-                    merged_data[f'diff_abs_{ref_code}'] / merged_data[f'{ref_code}_spread'] * 100
-                )
+                # 方法2：基于百分比差异的异常检测（当前值与历史平均值的百分比差异）
+                merged_data[f'is_anomaly_pct_{col}'] = merged_data[f'{col}_pct_diff_from_mean'] > threshold_pct
                 
-                # 标记异常事件（差值差异超过阈值）
-                merged_data[f'is_anomaly_{ref_code}'] = (
-                    merged_data[f'diff_pct_{ref_code}'].abs() > threshold_pct
-                )
+                # 方法3：基于绝对差异的异常检测（当前值与历史平均值的绝对差异）
+                # 这里使用历史标准差作为阈值
+                merged_data[f'is_anomaly_abs_{col}'] = merged_data[f'{col}_abs_diff_from_mean'] > merged_data[f'{col}_hist_std']
             
             # 计算综合异常指标（任一参考品种出现异常即标记为异常）
-            anomaly_cols = [f'is_anomaly_{ref_code}' for ref_code in reference_data.keys()]
-            merged_data['is_fat_finger'] = merged_data[anomaly_cols].any(axis=1)
+            zscore_anomaly_cols = [f'is_anomaly_zscore_{col}' for col in spread_diff_cols]
+            pct_anomaly_cols = [f'is_anomaly_pct_{col}' for col in spread_diff_cols]
+            abs_anomaly_cols = [f'is_anomaly_abs_{col}' for col in spread_diff_cols]
+            
+            merged_data['is_fat_finger_zscore'] = merged_data[zscore_anomaly_cols].any(axis=1)
+            merged_data['is_fat_finger_pct'] = merged_data[pct_anomaly_cols].any(axis=1)
+            merged_data['is_fat_finger_abs'] = merged_data[abs_anomaly_cols].any(axis=1)
+            
+            # 综合三种方法的结果，任一方法检测到异常即标记为异常
+            merged_data['is_fat_finger'] = (
+                merged_data['is_fat_finger_zscore'] | 
+                merged_data['is_fat_finger_pct'] | 
+                merged_data['is_fat_finger_abs']
+            )
             
             # 筛选异常事件
             current_events_data = merged_data[merged_data['is_fat_finger']].copy()
@@ -580,53 +818,72 @@ class FatFingerDetector:
         
         # 最终使用所有已识别的乌龙指日期重新计算价格差值
         print("使用最终识别的乌龙指日期重新计算价格差值...")
-        target_data_spread = self.calculate_price_spread(
-            target_data, window=window, exclude_dates=exclude_dates
+        
+        # 计算目标品种与所有参考品种的当天价格差值差异
+        final_daily_spread_diff = self.calculate_all_spread_differences(
+            target_data, reference_data, target_code, reference_codes, exclude_dates=exclude_dates
         )
         
-        reference_data_spread = {}
-        for ref_code, ref_data in reference_data.items():
-            reference_data_spread[ref_code] = self.calculate_price_spread(
-                ref_data, window=window, exclude_dates=exclude_dates
-            )
+        # 计算历史差值差异的统计特征
+        final_daily_spread_diff_stats = self.calculate_historical_spread_difference_stats(
+            final_daily_spread_diff, window=window, exclude_dates=exclude_dates
+        )
         
-        # 合并最终结果
-        final_merged_data = target_data_spread[['date', 'price_spread', 'price_spread_pct']].copy()
-        final_merged_data.rename(columns={
-            'price_spread': f'{target_code}_spread',
-            'price_spread_pct': f'{target_code}_spread_pct'
-        }, inplace=True)
+        # 基于历史统计特征标记异常事件
+        final_merged_data = final_daily_spread_diff_stats.copy()
         
-        for ref_code, ref_data_spread in reference_data_spread.items():
-            final_merged_data = pd.merge(
-                final_merged_data,
-                ref_data_spread[['date', 'price_spread', 'price_spread_pct']],
-                on='date',
-                how='left',
-                suffixes=('', f'_{ref_code}')
-            )
-            final_merged_data.rename(columns={
-                'price_spread': f'{ref_code}_spread',
-                'price_spread_pct': f'{ref_code}_spread_pct'
-            }, inplace=True)
+        # 找出所有差值差异列（只包含基础列名，不包含统计特征列）
+        spread_diff_cols = [col for col in final_merged_data.columns 
+                           if 'spread_diff_' in col and 'abs' not in col 
+                           and '_hist_mean' not in col and '_hist_std' not in col 
+                           and '_zscore' not in col and '_pct_diff_from_mean' not in col 
+                           and '_abs_diff_from_mean' not in col]
         
-        # 重新计算差值差异和异常标记
-        for ref_code in reference_data.keys():
-            final_merged_data[f'diff_abs_{ref_code}'] = (
-                final_merged_data[f'{target_code}_spread'] - final_merged_data[f'{ref_code}_spread']
-            )
-            final_merged_data[f'diff_pct_{ref_code}'] = (
-                final_merged_data[f'diff_abs_{ref_code}'] / final_merged_data[f'{ref_code}_spread'] * 100
-            )
-            final_merged_data[f'is_anomaly_{ref_code}'] = (
-                final_merged_data[f'diff_pct_{ref_code}'].abs() > threshold_pct
-            )
+        # 为每个差值差异列标记异常事件
+        for col in spread_diff_cols:
+            # 方法1：基于Z-score的异常检测（当前值与历史平均值的差异倍数）
+            final_merged_data[f'is_anomaly_zscore_{col}'] = final_merged_data[f'{col}_zscore'].abs() > 2.0
+            
+            # 方法2：基于百分比差异的异常检测（当前值与历史平均值的百分比差异）
+            final_merged_data[f'is_anomaly_pct_{col}'] = final_merged_data[f'{col}_pct_diff_from_mean'] > threshold_pct
+            
+            # 方法3：基于绝对差异的异常检测（当前值与历史平均值的绝对差异）
+            # 这里使用历史标准差作为阈值
+            final_merged_data[f'is_anomaly_abs_{col}'] = final_merged_data[f'{col}_abs_diff_from_mean'] > final_merged_data[f'{col}_hist_std']
         
-        anomaly_cols = [f'is_anomaly_{ref_code}' for ref_code in reference_data.keys()]
-        final_merged_data['is_fat_finger'] = final_merged_data[anomaly_cols].any(axis=1)
+        # 计算综合异常指标（任一参考品种出现异常即标记为异常）
+        zscore_anomaly_cols = [f'is_anomaly_zscore_{col}' for col in spread_diff_cols]
+        pct_anomaly_cols = [f'is_anomaly_pct_{col}' for col in spread_diff_cols]
+        abs_anomaly_cols = [f'is_anomaly_abs_{col}' for col in spread_diff_cols]
+        
+        final_merged_data['is_fat_finger_zscore'] = final_merged_data[zscore_anomaly_cols].any(axis=1)
+        final_merged_data['is_fat_finger_pct'] = final_merged_data[pct_anomaly_cols].any(axis=1)
+        final_merged_data['is_fat_finger_abs'] = final_merged_data[abs_anomaly_cols].any(axis=1)
+        
+        # 综合三种方法的结果，任一方法检测到异常即标记为异常
+        final_merged_data['is_fat_finger'] = (
+            final_merged_data['is_fat_finger_zscore'] | 
+            final_merged_data['is_fat_finger_pct'] | 
+            final_merged_data['is_fat_finger_abs']
+        )
         
         # 筛选最终异常事件
         final_events_data = final_merged_data[final_merged_data['is_fat_finger']].copy()
+        
+        # 添加异常原因分析
+        if not final_events_data.empty:
+            for idx, row in final_events_data.iterrows():
+                reasons = []
+                for col in spread_diff_cols:
+                    if row[f'is_anomaly_zscore_{col}']:
+                        reasons.append(f"{col} Z-score异常({row[f'{col}_zscore']:.2f})")
+                    if row[f'is_anomaly_pct_{col}']:
+                        reasons.append(f"{col} 百分比差异({row[f'{col}_pct_diff_from_mean']:.2f}%)")
+                    if row[f'is_anomaly_abs_{col}']:
+                        reasons.append(f"{col} 绝对差异({row[f'{col}_abs_diff_from_mean']:.2f})")
+                
+                # 将原因列表合并为字符串
+                final_events_data.at[idx, 'anomaly_reasons'] = "; ".join(reasons)
         
         # 保存结果
         if save_to_csv:
@@ -683,11 +940,36 @@ class FatFingerDetector:
         for idx, row in events_data.iterrows():
             report.append(f"异常事件 #{idx+1}:")
             report.append(f"  日期: {row['date'].strftime('%Y-%m-%d')}")
-            report.append(f"  {target_code} 价格差值: {row[f'{target_code}_spread']:.2f}")
+            
+            # 显示目标品种和参考品种的当天价格差值
+            if f'{target_code}_spread' in row:
+                target_spread = row[f'{target_code}_spread']
+                report.append(f"  {target_code} 当天价格差值: {target_spread:.2f}")
             
             for ref_code in reference_codes:
-                if f'diff_pct_{ref_code}' in row and not pd.isna(row[f'diff_pct_{ref_code}']):
-                    report.append(f"  与 {ref_code} 差值差异: {row[f'diff_pct_{ref_code}']:.2f}%")
+                if f'{ref_code}_spread' in row:
+                    ref_spread = row[f'{ref_code}_spread']
+                    report.append(f"  {ref_code} 当天价格差值: {ref_spread:.2f}")
+                
+                if f'spread_diff_{target_code}_{ref_code}' in row:
+                    spread_diff = row[f'spread_diff_{target_code}_{ref_code}']
+                    spread_diff_abs = row[f'spread_diff_abs_{target_code}_{ref_code}']
+                    report.append(f"  差值差异: {spread_diff:.2f} (绝对值: {spread_diff_abs:.2f})")
+                    
+                    # 显示历史统计信息
+                    if f'spread_diff_{target_code}_{ref_code}_hist_mean' in row:
+                        hist_mean = row[f'spread_diff_{target_code}_{ref_code}_hist_mean']
+                        hist_std = row[f'spread_diff_{target_code}_{ref_code}_hist_std']
+                        zscore = row[f'spread_diff_{target_code}_{ref_code}_zscore']
+                        pct_diff = row[f'spread_diff_{target_code}_{ref_code}_pct_diff_from_mean']
+                        
+                        report.append(f"  历史平均差值: {hist_mean:.2f} ± {hist_std:.2f}")
+                        report.append(f"  当前差值与历史平均的差异: {pct_diff:.2f}%")
+                        report.append(f"  Z-score: {zscore:.2f}")
+            
+            # 显示异常原因
+            if 'anomaly_reasons' in row:
+                report.append(f"  异常原因: {row['anomaly_reasons']}")
             
             report.append("")
         
@@ -712,19 +994,19 @@ class FatFingerDetector:
         plt.figure(figsize=(15, 10))
         
         # 创建子图
-        fig, axes = plt.subplots(2, 1, figsize=(15, 10))
+        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
         
         # 第一个子图：价格差值趋势
         ax1 = axes[0]
         ax1.plot(full_data['date'], full_data[f'{target_code}_spread'], 
-                label=f'{target_code} 价格差值', linewidth=2)
+                label=f'{target_code} 当天价格差值', linewidth=2)
         
         for ref_code in reference_codes:
             if f'{ref_code}_spread' in full_data.columns:
                 ax1.plot(full_data['date'], full_data[f'{ref_code}_spread'], 
-                        label=f'{ref_code} 价格差值', linestyle='--')
+                        label=f'{ref_code} 当天价格差值', linestyle='--')
         
-        ax1.set_title('期货品种价格差值趋势（20日滚动窗口）', fontsize=14)
+        ax1.set_title('期货品种当天价格差值趋势', fontsize=14)
         ax1.set_ylabel('价格差值', fontsize=12)
         ax1.legend()
         ax1.grid(True)
@@ -732,13 +1014,12 @@ class FatFingerDetector:
         # 第二个子图：差值差异
         ax2 = axes[1]
         for ref_code in reference_codes:
-            if f'diff_pct_{ref_code}' in full_data.columns:
-                ax2.plot(full_data['date'], full_data[f'diff_pct_{ref_code}'], 
-                        label=f'{target_code} vs {ref_code} 差值差异(%)', linestyle='-')
+            if f'spread_diff_{target_code}_{ref_code}' in full_data.columns:
+                ax2.plot(full_data['date'], full_data[f'spread_diff_{target_code}_{ref_code}'], 
+                        label=f'{target_code} vs {ref_code} 差值差异', linestyle='-')
         
-        # 添加阈值线
-        ax2.axhline(y=50, color='r', linestyle=':', label='异常阈值(50%)')
-        ax2.axhline(y=-50, color='r', linestyle=':')
+        # 添加零线
+        ax2.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
         
         # 标记异常事件
         if events_data is not None and not events_data.empty:
@@ -747,9 +1028,31 @@ class FatFingerDetector:
         
         ax2.set_title('目标品种与参考品种的差值差异', fontsize=14)
         ax2.set_xlabel('日期', fontsize=12)
-        ax2.set_ylabel('差值差异(%)', fontsize=12)
+        ax2.set_ylabel('差值差异', fontsize=12)
         ax2.legend()
         ax2.grid(True)
+        
+        # 第三个子图：Z-score
+        ax3 = axes[2]
+        for ref_code in reference_codes:
+            if f'spread_diff_{target_code}_{ref_code}_zscore' in full_data.columns:
+                ax3.plot(full_data['date'], full_data[f'spread_diff_{target_code}_{ref_code}_zscore'], 
+                        label=f'{target_code} vs {ref_code} Z-score', linestyle='-')
+        
+        # 添加Z-score阈值线
+        ax3.axhline(y=2.0, color='r', linestyle=':', label='Z-score阈值(±2.0)')
+        ax3.axhline(y=-2.0, color='r', linestyle=':')
+        
+        # 标记异常事件
+        if events_data is not None and not events_data.empty:
+            for idx, row in events_data.iterrows():
+                ax3.axvline(x=row['date'], color='red', alpha=0.3, linestyle='--')
+        
+        ax3.set_title('差值差异的Z-score', fontsize=14)
+        ax3.set_xlabel('日期', fontsize=12)
+        ax3.set_ylabel('Z-score', fontsize=12)
+        ax3.legend()
+        ax3.grid(True)
         
         plt.tight_layout()
         

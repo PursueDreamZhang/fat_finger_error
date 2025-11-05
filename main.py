@@ -111,7 +111,7 @@ def add_future_calculated_fields(df):
     - df: 包含期货历史数据的DataFrame
     
     返回:
-    - DataFrame: 添加了计算字段的数据框
+    - DataFrame: 添加了计算字段的数据框，包含最高价与最低价的差值列
     """
     
     # 确保数据不为空
@@ -148,23 +148,9 @@ def add_future_calculated_fields(df):
         print(f"数据列：{df.columns.tolist()}")
         return df
     
-    # 添加计算字段：最低价与收盘价的差值百分比
-    # 计算公式：((最低价 - 收盘价) / 收盘价) * 100%
-    # 处理收盘价为0的异常情况
-    df['最低价与收盘价差值百分比'] = df.apply(
-        lambda row: round((row[low_col] - row[close_col]) / row[close_col] * 100, 2) 
-        if row[close_col] != 0 else 0.0, 
-        axis=1
-    )
-    
-    # 添加计算字段：最高价与收盘价的差值百分比
-    # 计算公式：((最高价 - 收盘价) / 收盘价) * 100%
-    # 处理收盘价为0的异常情况
-    df['最高价与收盘价差值百分比'] = df.apply(
-        lambda row: round((row[high_col] - row[close_col]) / row[close_col] * 100, 2) 
-        if row[close_col] != 0 else 0.0, 
-        axis=1
-    )
+    # 添加计算字段：最高价与最低价的差值
+    # 计算公式：最高价 - 最低价
+    df['最高价与最低价差值'] = df[high_col] - df[low_col]
     
     return df
 
