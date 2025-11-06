@@ -529,15 +529,12 @@ class FatFingerDetector:
         
         return df
     
-    def calculate_price_spread(self, data, window=20, exclude_dates=None):
+    def calculate_price_spread(self, data):
         """
         计算期货品种在指定窗口期内的价格差值（最高价-最低价）
         
         参数:
         - data: 期货数据DataFrame
-        - window: 计算窗口，默认为20天（此参数保留以保持向后兼容性）
-        - exclude_dates: 需要排除的日期列表，这些日期的数据不会参与计算
-        
         返回:
         - DataFrame: 包含价格差值的数据
         """
@@ -546,34 +543,11 @@ class FatFingerDetector:
         # 确保数据按日期排序
         df = df.sort_values('date')
         
-        # 如果提供了排除日期列表，将这些日期的数据标记为需要排除
-        if exclude_dates is not None:
-            # 将exclude_dates转换为datetime类型（如果是字符串）
-            exclude_dates_dt = []
-            for date in exclude_dates:
-                if isinstance(date, str):
-                    exclude_dates_dt.append(pd.to_datetime(date))
-                else:
-                    exclude_dates_dt.append(date)
-            
-            # 标记需要排除的日期
-            df['to_exclude'] = df['date'].isin(exclude_dates_dt)
-        else:
-            df['to_exclude'] = False
-        
         # 计算当天的价格差值（最高价-最低价）
         df['price_spread'] = df['high'] - df['low']
-        
-        # 计算价格差值相对于最低价的百分比
-        df['price_spread_pct'] = (df['price_spread'] / df['low']) * 100
-        
-        # 删除临时列
-        if 'to_exclude' in df.columns:
-            df.drop('to_exclude', axis=1, inplace=True)
-        
         return df
     
-    def calculate_all_spread_differences(self, target_data, reference_data_dict, target_code, reference_codes, exclude_dates=None):
+    def calculate_all_spread_differences(self, target_data, reference_data_dict, target_code, reference_codes):
         """
         计算目标品种与所有参考品种的当天价格差值差异
         
@@ -588,20 +562,19 @@ class FatFingerDetector:
         - DataFrame: 包含价格差值差异的数据
         """
         # 计算目标品种的价格差值
-        target_spread = self.calculate_price_spread(target_data, exclude_dates=exclude_dates)
+        target_spread = self.calculate_price_spread(target_data)
         
         # 从目标品种的价格差值开始
-        merged_data = target_spread[['date', 'price_spread', 'price_spread_pct']].copy()
+        merged_data = target_spread[['date', 'price_spread']].copy()
         merged_data.rename(columns={
-            'price_spread': f'{target_code}_spread',
-            'price_spread_pct': f'{target_code}_spread_pct'
+            'price_spread': f'{target_code}_spread'
         }, inplace=True)
         
         # 为每个参考品种计算差值差异并合并
         for ref_code in reference_codes:
             if ref_code in reference_data_dict:
                 # 计算参考品种的价格差值
-                ref_spread = self.calculate_price_spread(reference_data_dict[ref_code], exclude_dates=exclude_dates)
+                ref_spread = self.calculate_price_spread(reference_data_dict[ref_code])
                 
                 # 合并目标品种和参考品种的数据
                 temp_data = pd.merge(
@@ -649,8 +622,8 @@ class FatFingerDetector:
         - DataFrame: 包含价格差值差异的数据
         """
         # 计算目标品种和参考品种的价格差值
-        target_spread = self.calculate_price_spread(target_data, exclude_dates=exclude_dates)
-        reference_spread = self.calculate_price_spread(reference_data, exclude_dates=exclude_dates)
+        target_spread = self.calculate_price_spread(target_data)
+        reference_spread = self.calculate_price_spread(reference_data)
         
         # 合并数据
         merged_data = pd.merge(
@@ -950,7 +923,7 @@ class FatFingerDetector:
             
             # 计算目标品种与所有参考品种的当天价格差值差异
             daily_spread_diff = self.calculate_all_spread_differences(
-                target_data, reference_data, target_code, reference_codes, exclude_dates=exclude_dates
+                target_data, reference_data, target_code, reference_codes
             )
             
             # 计算历史差值差异的统计特征

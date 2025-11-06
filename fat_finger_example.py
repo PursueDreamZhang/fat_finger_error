@@ -84,8 +84,6 @@ def main():
             threshold_pct=threshold_pct
         )
         
-        print(report)
-        
         # 保存报告到文件
         if not os.path.exists('data/report'):
             os.makedirs('data/report')
@@ -287,7 +285,7 @@ if __name__ == "__main__":
     main()
     
     # 测试不同参数
-    test_with_different_parameters()
+    #test_with_different_parameters()
     
     # 分析价格差值模式
-    analyze_price_spread_patterns()
+   # analyze_price_spread_patterns()
