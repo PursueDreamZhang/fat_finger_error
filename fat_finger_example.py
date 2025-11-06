@@ -32,12 +32,12 @@ def main():
     # 2. 设置参数
     target_code = "CU2404"  # 目标期货品种代码（沪铜2404合约）
     reference_codes = ["CU2405", "CU2403", "CU0"]  # 参考期货品种代码列表
-    threshold_pct = 50.0  # 价格差值差异阈值（百分比）
+    threshold_pct = 500.0  # 价格差值差异阈值（百分比）
     window = 20  # 历史统计窗口（天数）
     
     # 设置日期范围（使用固定日期范围测试）
     end_date = "20231231"  # 固定结束日期
-    start_date = "20230105"  # 固定开始日期
+    start_date = "20230101"  # 固定开始日期
     
     print(f"目标品种: {target_code}")
     print(f"参考品种: {', '.join(reference_codes)}")

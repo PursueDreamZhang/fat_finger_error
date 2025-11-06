@@ -21,7 +21,16 @@ import seaborn as sns
 from datetime import datetime, timedelta
 import os
 import warnings
+import json
+import hashlib
 warnings.filterwarnings('ignore')
+
+# 导入缓存管理器
+try:
+    from cache_manager import CacheManager
+except ImportError:
+    print("警告：无法导入缓存管理器，将使用内置缓存功能")
+    CacheManager = None
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
@@ -42,8 +51,15 @@ class FatFingerDetector:
         """初始化乌龙指检测器"""
         self.results = {}
         
+        # 初始化缓存管理器
+        if CacheManager is not None:
+            self.cache_manager = CacheManager()
+        else:
+            self.cache_manager = None
+            print("警告：缓存管理器未初始化，将使用内置缓存功能")
+        
     def get_future_data(self, future_code, start_date=None, end_date=None, save_to_csv=True, 
-                        cache_days=1, use_cache=True):
+                        cache_days=10000, use_cache=True):
         """
         获取指定期货合约的历史数据并保存到本地，支持本地缓存机制
         
@@ -78,20 +94,59 @@ class FatFingerDetector:
         if not os.path.exists('data/csv_data'):
             os.makedirs('data/csv_data')
         
-        # 生成缓存文件名
-        cache_file_name = f"data/csv_data/future_{future_code}_{start_date}_{end_date}.csv"
+        # 创建参数字典用于生成哈希值
+        params = {
+            'future_code': future_code,
+            'start_date': start_date,
+            'end_date': end_date
+        }
         
-        # 检查缓存
-        if use_cache and os.path.exists(cache_file_name):
+        # 生成参数哈希值（用于内部缓存追踪）
+        params_str = str(sorted(params.items()))
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
+        
+        # 生成仅包含参数的缓存文件名
+        cache_file_path = f"data/csv_data/future_{future_code}_{start_date}_{end_date}.csv"
+        
+        # 创建缓存映射JSON文件路径
+        cache_mapping_file = "data/csv_data/cache_mapping.json"
+        
+        # 初始化缓存映射字典
+        cache_mapping = {}
+        if os.path.exists(cache_mapping_file):
+            try:
+                with open(cache_mapping_file, 'r', encoding='utf-8') as f:
+                    cache_mapping = json.load(f)
+            except Exception as e:
+                print(f"读取缓存映射文件失败: {e}")
+                cache_mapping = {}
+        
+        # 更新缓存映射
+        cache_mapping[cache_file_path] = {
+            'params': params,
+            'params_hash': params_hash,
+            'file_name': os.path.basename(cache_file_path),
+            'created_time': datetime.now().isoformat()
+        }
+        
+        # 保存缓存映射到JSON文件
+        try:
+            with open(cache_mapping_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_mapping, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存缓存映射文件失败: {e}")
+        
+        # 检查缓存文件是否存在且有效
+        if use_cache and os.path.exists(cache_file_path):
             try:
                 # 获取文件修改时间
-                file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_name))
+                file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_path))
                 current_time = datetime.now()
                 
                 # 检查缓存是否过期
                 if (current_time - file_mod_time).days < cache_days:
-                    print(f"使用缓存数据: {cache_file_name}")
-                    df = pd.read_csv(cache_file_name)
+                    print(f"使用缓存数据: {cache_file_path}")
+                    df = pd.read_csv(cache_file_path)
                     
                     # 确保日期列是datetime类型
                     if 'date' in df.columns:
@@ -113,13 +168,37 @@ class FatFingerDetector:
         
         try:
             # 使用AKShare获取期货历史数据
-            df = ak.futures_main_sina(symbol=future_code, start_date=start_date, end_date=end_date)
-            
-            # 如果获取不到数据，尝试其他接口
-            if df.empty:
-                print(f"使用第一个接口未获取到数据，尝试其他接口...")
-                # 尝试使用另一个接口
-                df = ak.futures_zh_daily_sina(symbol=future_code)
+            try:
+                # 首先尝试使用futures_main_sina接口
+                df = ak.futures_main_sina(symbol=future_code, start_date=start_date, end_date=end_date)
+                if df.empty:
+                    raise Exception("futures_main_sina返回空数据")
+            except Exception as e:
+                print(f"使用futures_main_sina接口失败: {e}")
+                print("尝试使用futures_zh_daily_sina接口获取数据...")
+                
+                # 尝试使用futures_zh_daily_sina接口
+                try:
+                    # 添加"0"表示主力合约
+                    df = ak.futures_zh_daily_sina(symbol=future_code + "0")
+                    if df.empty:
+                        raise Exception("futures_zh_daily_sina返回空数据")
+                    
+                    # 如果使用futures_zh_daily_sina接口，我们需要手动筛选日期范围
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        # 尝试多种日期格式解析
+                        try:
+                            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                        except:
+                            start_dt = pd.to_datetime(start_date)
+                            end_dt = pd.to_datetime(end_date)
+                        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+                        print(f"从获取的数据中筛选出 {len(df)} 条符合日期范围的数据")
+                except Exception as e2:
+                    print(f"使用futures_zh_daily_sina接口也失败: {e2}")
+                    raise Exception(f"所有接口都无法获取期货合约 {future_code} 的数据")
             
             if df.empty:
                 print(f"未获取到期货合约 {future_code} 的数据，请检查期货代码是否正确")
@@ -140,8 +219,8 @@ class FatFingerDetector:
             # 保存到CSV文件（更新缓存）
             if save_to_csv:
                 # 保存数据
-                df.to_csv(cache_file_name, index=False, encoding='utf-8-sig')
-                print(f"数据已保存到: {cache_file_name}")
+                df.to_csv(cache_file_path, index=False, encoding='utf-8-sig')
+                print(f"数据已保存到: {cache_file_path}")
             
             return df
             
@@ -185,20 +264,21 @@ class FatFingerDetector:
         if not os.path.exists('data/csv_data'):
             os.makedirs('data/csv_data')
         
-        # 生成缓存文件名
-        cache_file_name = f"data/csv_data/future_main_{exchange_symbol}_{start_date}_{end_date}.csv"
-        
-        # 检查缓存
-        if use_cache and os.path.exists(cache_file_name):
-            try:
-                # 获取文件修改时间
-                file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_name))
-                current_time = datetime.now()
-                
-                # 检查缓存是否过期
-                if (current_time - file_mod_time).days < cache_days:
-                    print(f"使用缓存数据: {cache_file_name}")
-                    df = pd.read_csv(cache_file_name)
+        # 使用缓存管理器（如果可用）
+        if self.cache_manager is not None:
+            # 创建参数字典
+            params = {
+                'exchange_symbol': exchange_symbol,
+                'start_date': start_date,
+                'end_date': end_date
+            }
+            
+            # 检查缓存是否有效
+            if use_cache and self.cache_manager.is_cache_valid('future_main', exchange_symbol, params, cache_days):
+                cache_info = self.cache_manager.get_cache_info('future_main', exchange_symbol, params)
+                if cache_info and os.path.exists(cache_info['file_path']):
+                    print(f"使用缓存数据: {cache_info['file_path']}")
+                    df = pd.read_csv(cache_info['file_path'])
                     
                     # 确保日期列是datetime类型
                     if 'date' in df.columns:
@@ -210,10 +290,92 @@ class FatFingerDetector:
                         return df
                     else:
                         print("缓存数据无效，将重新获取")
-                else:
-                    print(f"缓存数据已过期（超过{cache_days}天），将重新获取")
+            
+            # 获取缓存文件路径
+            cache_file_path = self.cache_manager.get_cache_file_path('future_main', exchange_symbol, params)
+        else:
+            # 使用内置缓存逻辑
+            # 创建参数字典用于生成哈希值
+            params = {
+                'exchange_symbol': exchange_symbol,
+                'start_date': start_date,
+                'end_date': end_date
+            }
+            
+            # 生成参数哈希值
+            params_str = str(sorted(params.items()))
+            params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
+            
+            # 生成仅包含参数的缓存文件名
+            cache_file_path = f"data/csv_data/future_main_{exchange_symbol}_{start_date}_{end_date}.csv"
+            
+            # 创建缓存映射JSON文件路径
+            cache_mapping_file = "data/csv_data/cache_mapping.json"
+            
+            # 初始化缓存映射字典
+            cache_mapping = {}
+            if os.path.exists(cache_mapping_file):
+                try:
+                    with open(cache_mapping_file, 'r', encoding='utf-8') as f:
+                        cache_mapping = json.load(f)
+                except Exception as e:
+                    print(f"读取缓存映射文件失败: {e}")
+                    cache_mapping = {}
+            
+            # 更新缓存映射
+            cache_mapping[cache_file_path] = {
+                'params': params,
+                'params_hash': params_hash,
+                'file_name': os.path.basename(cache_file_path),
+                'created_time': datetime.now().isoformat()
+            }
+            
+            # 保存缓存映射到JSON文件
+            try:
+                with open(cache_mapping_file, 'w', encoding='utf-8') as f:
+                    json.dump(cache_mapping, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"读取缓存文件时出错: {e}，将重新获取数据")
+                print(f"保存缓存映射文件失败: {e}")
+        
+            # 创建缓存元数据文件路径
+            cache_metadata_file = "data/csv_data/cache_metadata.json"
+            
+            # 初始化缓存元数据
+            cache_metadata = {}
+            if os.path.exists(cache_metadata_file):
+                try:
+                    with open(cache_metadata_file, 'r', encoding='utf-8') as f:
+                        cache_metadata = json.load(f)
+                except Exception as e:
+                    print(f"读取缓存元数据文件失败: {e}")
+                    cache_metadata = {}
+            
+            # 检查缓存
+            if use_cache and os.path.exists(cache_file_path):
+                try:
+                    # 获取文件修改时间
+                    file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_path))
+                    current_time = datetime.now()
+                    
+                    # 检查缓存是否过期
+                    if (current_time - file_mod_time).days < cache_days:
+                        print(f"使用缓存数据: {cache_file_path}")
+                        df = pd.read_csv(cache_file_path)
+                        
+                        # 确保日期列是datetime类型
+                        if 'date' in df.columns:
+                            df['date'] = pd.to_datetime(df['date'])
+                        
+                        # 验证数据有效性
+                        if not df.empty and len(df) > 0:
+                            print(f"从缓存加载 {len(df)} 条数据记录")
+                            return df
+                        else:
+                            print("缓存数据无效，将重新获取")
+                    else:
+                        print(f"缓存数据已过期（超过{cache_days}天），将重新获取")
+                except Exception as e:
+                    print(f"读取缓存文件时出错: {e}，将重新获取数据")
         
         # 缓存不存在、已过期或无效，重新获取数据
         print(f"正在获取期货主力合约 {exchange_symbol} 从 {start_date} 到 {end_date} 的历史数据...")
@@ -236,10 +398,38 @@ class FatFingerDetector:
                     df = ak.futures_zh_daily_sina(symbol=main_contract_code)
                     if df.empty:
                         raise Exception(f"使用主力合约代码 {main_contract_code} 获取数据为空")
+                    
+                    # 由于futures_zh_daily_sina不支持日期参数，我们需要手动筛选日期范围
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        # 尝试多种日期格式解析
+                        try:
+                            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                        except:
+                            start_dt = pd.to_datetime(start_date)
+                            end_dt = pd.to_datetime(end_date)
+                        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+                        print(f"从获取的数据中筛选出 {len(df)} 条符合日期范围的数据")
                 except Exception as e2:
                     print(f"使用主力合约代码 {main_contract_code} 失败: {e2}")
                     print(f"尝试使用品种代码 {exchange_symbol} 直接获取...")
-                    df = ak.futures_zh_daily_sina(symbol=exchange_symbol)
+                    
+                    try:
+                        df = ak.futures_zh_daily_sina(symbol=exchange_symbol)
+                        if df.empty:
+                            raise Exception(f"使用品种代码 {exchange_symbol} 获取数据为空")
+                        
+                        # 由于futures_zh_daily_sina不支持日期参数，我们需要手动筛选日期范围
+                        if 'date' in df.columns:
+                            df['date'] = pd.to_datetime(df['date'])
+                            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                            df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+                            print(f"从获取的数据中筛选出 {len(df)} 条符合日期范围的数据")
+                    except Exception as e3:
+                        print(f"使用品种代码 {exchange_symbol} 也失败: {e3}")
+                        raise Exception(f"所有接口都无法获取期货主力合约 {exchange_symbol} 的数据")
             
             if df.empty:
                 print(f"未获取到期货主力合约 {exchange_symbol} 的数据，请检查品种代码是否正确")
@@ -260,8 +450,29 @@ class FatFingerDetector:
             # 保存到CSV文件（更新缓存）
             if save_to_csv:
                 # 保存数据
-                df.to_csv(cache_file_name, index=False, encoding='utf-8-sig')
-                print(f"数据已保存到: {cache_file_name}")
+                df.to_csv(cache_file_path, index=False, encoding='utf-8-sig')
+                print(f"数据已保存到: {cache_file_path}")
+                
+                # 使用缓存管理器注册缓存（如果可用）
+                if self.cache_manager is not None:
+                    self.cache_manager.register_cache('future_main', exchange_symbol, params, cache_file_path, len(df))
+                else:
+                    # 更新缓存元数据
+                    try:
+                        # 使用文件路径作为键，而不是哈希值
+                        cache_key = cache_file_path
+                        cache_metadata[cache_key] = {
+                            'params': params,
+                            'params_hash': params_hash,
+                            'file_path': cache_file_path,
+                            'created_time': datetime.now().isoformat(),
+                            'data_count': len(df)
+                        }
+                        
+                        with open(cache_metadata_file, 'w', encoding='utf-8') as f:
+                            json.dump(cache_metadata, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"更新缓存元数据失败: {e}")
             
             return df
             
@@ -937,8 +1148,8 @@ class FatFingerDetector:
         events_data = events_data.sort_values('date')
         
         # 添加每个异常事件的详细信息
-        for idx, row in events_data.iterrows():
-            report.append(f"异常事件 #{idx+1}:")
+        for i, (idx, row) in enumerate(events_data.iterrows()):
+            report.append(f"异常事件 #{i+1}:")
             report.append(f"  日期: {row['date'].strftime('%Y-%m-%d')}")
             
             # 显示目标品种和参考品种的当天价格差值
@@ -1063,4 +1274,4 @@ class FatFingerDetector:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"可视化图表已保存到: {save_path}")
         
-        plt.show()
+        #plt.show()
