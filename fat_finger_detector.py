@@ -503,6 +503,9 @@ class FatFingerDetector:
         if date_col is not None:
             # 将日期列重命名为'date'并转换为datetime类型
             df['date'] = pd.to_datetime(df[date_col])
+            # 如果原始列名不是'date'，删除原始列以避免重复
+            if date_col != 'date':
+                df.drop(columns=[date_col], inplace=True)
         else:
             # 如果没有日期列，使用索引创建
             df['date'] = pd.to_datetime(df.index)
@@ -520,12 +523,18 @@ class FatFingerDetector:
         for chinese_col, english_col in price_columns.items():
             if chinese_col in df.columns and english_col not in df.columns:
                 df[english_col] = df[chinese_col]
+                # 删除原始中文列以避免重复
+                df.drop(columns=[chinese_col], inplace=True)
         
         # 确保数值列为float类型
         numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'open_interest']
         for col in numeric_columns:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 添加"最高价-最低价差值"列
+        if 'high' in df.columns and 'low' in df.columns:
+            df['最高价-最低价差值'] = df['high'] - df['low']
         
         return df
     
@@ -543,8 +552,13 @@ class FatFingerDetector:
         # 确保数据按日期排序
         df = df.sort_values('date')
         
-        # 计算当天的价格差值（最高价-最低价）
-        df['price_spread'] = df['high'] - df['low']
+        # 如果已有'最高价-最低价差值'列，直接使用；否则计算
+        if '最高价-最低价差值' not in df.columns and 'high' in df.columns and 'low' in df.columns:
+            df['最高价-最低价差值'] = df['high'] - df['low']
+        
+        # 为了保持向后兼容性，同时创建price_spread列，指向相同的值
+        df['price_spread'] = df['最高价-最低价差值']
+        
         return df
     
     def calculate_all_spread_differences(self, target_data, reference_data_dict, target_code, reference_codes):
