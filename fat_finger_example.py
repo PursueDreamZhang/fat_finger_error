@@ -32,7 +32,9 @@ def main():
     # 2. 设置参数
     target_code = "CU2404"  # 目标期货品种代码（沪铜2404合约）
     reference_codes = ["CU2405", "CU2403", "CU0"]  # 参考期货品种代码列表
-    threshold_pct = 500.0  # 价格差值差异阈值（百分比）
+    threshold_pct = 5000.0  # 价格差值差异阈值（百分比）
+    use_absolute_diff = False  # 是否使用绝对差异检测
+
     window = 20  # 历史统计窗口（天数）
     
     # 设置日期范围（使用固定日期范围测试）
@@ -60,6 +62,7 @@ def main():
         end_date=end_date,
         threshold_pct=threshold_pct,
         window=window,
+        use_absolute_diff=use_absolute_diff,
         save_to_csv=True
     )
     
