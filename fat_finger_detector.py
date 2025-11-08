@@ -711,3 +711,44 @@ class FatFingerDetector:
             print(f"可视化图表已保存到: {save_path}")
         
         #plt.show()
+
+    def clean_generated_files(self, report_dir="data/report", pic_dir="data/pic", csv_dir="data/csv_data"):
+        """
+        清理生成的报告、图片和非缓存的CSV文件
+
+        参数:
+        - report_dir: 报告文件目录
+        - pic_dir: 图片文件目录
+        - csv_dir: CSV文件目录 (仅清理报告相关的CSV)
+        """
+        import glob
+
+        cleaned_count = 0
+        
+        # 定义要清理的文件模式
+        patterns = [
+            os.path.join(report_dir, '*'),
+            os.path.join(pic_dir, '*'),
+            os.path.join(csv_dir, 'fat_finger_*.csv') # 仅匹配报告相关的CSV
+        ]
+        
+        print("开始清理生成的文件...")
+
+        # 确保目录存在，避免glob出错
+        for dir_path in [report_dir, pic_dir, csv_dir]:
+            if not os.path.exists(dir_path):
+                print(f"目录不存在，跳过: {dir_path}")
+
+        for pattern in patterns:
+            files_to_delete = glob.glob(pattern)
+            for file_path in files_to_delete:
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                        print(f"已删除文件: {file_path}")
+                        cleaned_count += 1
+                except Exception as e:
+                    print(f"删除文件失败: {file_path}, 错误: {e}")
+        
+        print(f"清理完成，共删除了 {cleaned_count} 个文件。")
+        return cleaned_count

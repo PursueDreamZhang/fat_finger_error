@@ -109,6 +109,19 @@ def main():
         save_path=plot_path
     )
 
+    print("\n示例运行完成！")
+
+    # 清理生成的文件
+def clean_generated_files():
+
+    # 1. 创建检测器实例
+    detector = FatFingerDetector()
+    """
+    清理生成的报告、图片和非缓存的CSV文件
+    """
+    detector.clean_generated_files()
+
 if __name__ == "__main__":
     # 运行主示例
     main()
+   #clean_generated_files()
