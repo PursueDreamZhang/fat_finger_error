@@ -32,14 +32,13 @@ def main():
     # 2. 设置参数
     target_code = "CU2404"  # 目标期货品种代码（沪铜2404合约）
     reference_codes = ["CU2405", "CU2403", "CU0"]  # 参考期货品种代码列表
-    threshold_pct = 5000.0  # 价格差值差异阈值（百分比）
-    use_absolute_diff = False  # 是否使用绝对差异检测
+    threshold_pct = 5  # 价格差值差异阈值（百分比）
 
     window = 20  # 历史统计窗口（天数）
     
     # 设置日期范围（使用固定日期范围测试）
     end_date = "20231231"  # 固定结束日期
-    start_date = "20230101"  # 固定开始日期
+    start_date = "20220101"  # 固定开始日期
     
     print(f"目标品种: {target_code}")
     print(f"参考品种: {', '.join(reference_codes)}")
@@ -60,10 +59,8 @@ def main():
         reference_codes=reference_codes,
         start_date=start_date,
         end_date=end_date,
-        threshold_pct=threshold_pct,
-        window=window,
-        use_absolute_diff=use_absolute_diff,
-        save_to_csv=True
+        save_to_csv=True,
+        difference_threshold=threshold_pct
     )
     
     # 4. 检查检测结果
@@ -84,7 +81,9 @@ def main():
             events_data=events_data,
             target_code=target_code,
             reference_codes=reference_codes,
-            threshold_pct=threshold_pct
+            threshold_pct=threshold_pct,
+            start_date=start_date,
+            end_date=end_date
         )
         
         # 保存报告到文件
