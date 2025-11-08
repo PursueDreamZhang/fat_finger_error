@@ -91,8 +91,8 @@ class FatFingerDetector:
         # 创建data文件夹和csv_data子文件夹（如果不存在）
         if not os.path.exists('data'):
             os.makedirs('data')
-        if not os.path.exists('data/csv_data'):
-            os.makedirs('data/csv_data')
+        if not os.path.exists('data/csv_data/data'):
+            os.makedirs('data/csv_data/data')
         
         # 创建参数字典用于生成哈希值
         params = {
@@ -106,10 +106,10 @@ class FatFingerDetector:
         params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
         
         # 生成仅包含参数的缓存文件名
-        cache_file_path = f"data/csv_data/future_{future_code}_{start_date}_{end_date}.csv"
+        cache_file_path = f"data/csv_data/data/future_{future_code}_{start_date}_{end_date}.csv"
         
         # 创建缓存映射JSON文件路径
-        cache_mapping_file = "data/csv_data/cache_mapping.json"
+        cache_mapping_file = "data/csv_data/data/cache_mapping.json"
         
         # 初始化缓存映射字典
         cache_mapping = {}
