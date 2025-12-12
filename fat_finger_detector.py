@@ -364,12 +364,20 @@ class FatFingerDetector:
         if 'low' not in target_data.columns or 'high' not in target_data.columns:
             raise ValueError("目标数据必须包含'low'和'high'列")
         
-        # 从目标品种的数据开始
-        merged_data = target_data[['date', 'low', 'high']].copy()
-        merged_data.rename(columns={
+        # 从目标品种的数据开始，包含成交量列
+        target_cols = ['date', 'low', 'high']
+        if 'volume' in target_data.columns:
+            target_cols.append('volume')
+        
+        merged_data = target_data[target_cols].copy()
+        rename_dict = {
             'low': f'{target_code}_low',
             'high': f'{target_code}_high'
-        }, inplace=True)
+        }
+        if 'volume' in merged_data.columns:
+            rename_dict['volume'] = f'{target_code}_volume'
+        
+        merged_data.rename(columns=rename_dict, inplace=True)
         
         # 为每个参考品种计算最低值和最高值差值并合并
         for ref_code in reference_codes:
@@ -381,10 +389,14 @@ class FatFingerDetector:
                     print(f"参考品种 {ref_code} 缺少'low'或'high'列，跳过")
                     continue
                 
-                # 合并目标品种和参考品种的数据
+                # 合并目标品种和参考品种的数据，包含成交量
+                ref_cols = ['date', 'low', 'high']
+                if 'volume' in ref_data.columns:
+                    ref_cols.append('volume')
+                
                 temp_data = pd.merge(
-                    merged_data[['date', f'{target_code}_low', f'{target_code}_high']],
-                    ref_data[['date', 'low', 'high']],
+                    merged_data[[col for col in merged_data.columns if col != 'date' or col == 'date']],
+                    ref_data[ref_cols],
                     on='date',
                     how='inner'
                 )
@@ -399,11 +411,21 @@ class FatFingerDetector:
                     temp_data[f'{target_code}_high'] - temp_data['high']
                 )
                 
+                # 将参考品种的成交量重命名并合并
+                if 'volume' in temp_data.columns:
+                    temp_data[f'{ref_code}_volume'] = temp_data['volume']
+                    temp_data.drop(columns=['volume'], inplace=True)
+                
                 # 将差值合并到主数据中
                 if f'low_diff_{target_code}_{ref_code}' not in merged_data.columns:
+                    # 准备要合并的列
+                    merge_cols = ['date', f'low_diff_{target_code}_{ref_code}', f'high_diff_{target_code}_{ref_code}']
+                    if f'{ref_code}_volume' in temp_data.columns:
+                        merge_cols.append(f'{ref_code}_volume')
+                    
                     merged_data = pd.merge(
                         merged_data,
-                        temp_data[['date', f'low_diff_{target_code}_{ref_code}', f'high_diff_{target_code}_{ref_code}']],
+                        temp_data[merge_cols],
                         on='date',
                         how='left'
                     )
@@ -416,7 +438,7 @@ class FatFingerDetector:
 
     def detect_fat_finger_events(self, target_code, reference_codes, start_date=None, end_date=None,
                                  difference_threshold=0.1, save_to_csv=True, window_size=20,
-                                 amplitude_ratio_threshold=2.0):
+                                 amplitude_ratio_threshold=2.0, min_absolute_difference_pct=0.0):
         """
         检测乌龙指事件（基于价格差异阈值和振幅倍数）
 
@@ -428,6 +450,7 @@ class FatFingerDetector:
         3.  **异常判定**: 
             - 如果任一差异的绝对值超过了 `difference_threshold`，判定为差异异常
             - 如果当前振幅超过历史平均振幅的 `amplitude_ratio_threshold` 倍，判定为振幅异常
+            - 如果差异值的绝对值大于 `min_absolute_difference_pct` 与最低值的乘积，判定为绝对差异异常
             - 只有同时满足差异异常和振幅异常，才将该日期标记为乌龙指事件
 
         参数:
@@ -439,6 +462,7 @@ class FatFingerDetector:
         - save_to_csv: 是否保存结果到CSV，默认为True。
         - window_size: 计算历史平均值的窗口大小，默认为20天
         - amplitude_ratio_threshold: 振幅倍数阈值，当前振幅超过历史平均振幅的倍数，默认为2.0
+        - min_absolute_difference_pct: 最低绝对差异百分比，差异值必须大于此百分比与最低值的乘积才被视为异常，默认为0.0
 
         返回:
         - tuple: (full_data, events_data)
@@ -496,17 +520,28 @@ class FatFingerDetector:
             target_data, reference_data, target_code, reference_codes
         )
         
-        # 将参考品种的原始最低价和最高价合并到 full_data 中
+        # 将参考品种的原始最低价、最高价和成交量合并到 full_data 中
         for ref_code, ref_df in reference_data.items():
             if ref_code in reference_data:
+                # 确定要合并的列，包含成交量
+                merge_cols = ['date', 'low', 'high']
+                if 'volume' in ref_df.columns:
+                    merge_cols.append('volume')
+                
                 full_data = pd.merge(
                     full_data,
-                    ref_df[['date', 'low', 'high']],
+                    ref_df[merge_cols],
                     on='date',
                     how='left',
                     suffixes=('', f'_{ref_code}')
                 )
-                full_data.rename(columns={'low': f'{ref_code}_low', 'high': f'{ref_code}_high'}, inplace=True)
+                
+                # 重命名列
+                rename_dict = {'low': f'{ref_code}_low', 'high': f'{ref_code}_high'}
+                if 'volume' in full_data.columns:
+                    rename_dict['volume'] = f'{ref_code}_volume'
+                
+                full_data.rename(columns=rename_dict, inplace=True)
         
         # 步骤1.5: 计算历史平均值（前20天的平均值）
         print("步骤1.5: 计算历史平均值（前20天的平均值）...")
@@ -533,33 +568,42 @@ class FatFingerDetector:
         for idx, row in full_data.iterrows():
             reasons = []
             is_diff_anomaly = False
-
+            
             for ref_code in reference_codes:
+                # 获取目标品种最低值（用于计算绝对差异阈值）
+                target_low = row.get(f'{target_code}_low')
+                absolute_diff_threshold = min_absolute_difference_pct / 100 * target_low
                 # 检查最高值差异异常
                 high_diff = row.get(f'high_diff_{target_code}_{ref_code}')
                 # 获取前20天最高值差异的平均值
                 high_diff_hist_mean = row.get(f'high_diff_{target_code}_{ref_code}_hist_mean')
-                
                 # 使用历史平均值进行异常检测
                 if pd.notna(high_diff) and pd.notna(high_diff_hist_mean) and high_diff_hist_mean != 0:
-                    # 直接与阈值比较
-                    if abs((high_diff - high_diff_hist_mean) / high_diff_hist_mean) > difference_threshold:
-                        is_diff_anomaly = True
-                        reasons.append(f"与{ref_code}最高值差异异常 (比率: {abs((high_diff - high_diff_hist_mean) / high_diff_hist_mean):.2%})")
+                    # 计算差异比率
+                    diff_ratio = abs((high_diff - high_diff_hist_mean) / high_diff_hist_mean)
+                    actual_absolute_diff = abs(high_diff)
                     
+                    # 双重条件判断：差异比率超过阈值 且 绝对差异值大于最低值百分比乘积
+                    if diff_ratio > difference_threshold and actual_absolute_diff > absolute_diff_threshold:
+                        is_diff_anomaly = True
+                        reasons.append(f"与{ref_code}最高值差异异常 (比率: {diff_ratio:.2%}, 绝对差异: {actual_absolute_diff:.2f})")
+                
                 # 检查最低值差异异常
                 low_diff = row.get(f'low_diff_{target_code}_{ref_code}')
                 # 获取前20天最低值差异的平均值
                 low_diff_hist_mean = row.get(f'low_diff_{target_code}_{ref_code}_hist_mean')
-                
                 # 使用历史平均值进行异常检测
                 if pd.notna(low_diff) and pd.notna(low_diff_hist_mean) and low_diff_hist_mean != 0:
-                    # 直接与阈值比较
-                    if abs((low_diff - low_diff_hist_mean) / low_diff_hist_mean) > difference_threshold:
-                        is_diff_anomaly = True
-                        reasons.append(f"与{ref_code}最低值差异异常 (比率: {abs((low_diff - low_diff_hist_mean) / low_diff_hist_mean):.2%})")
-                
+                    # 计算差异比率
+                    diff_ratio = abs((low_diff - low_diff_hist_mean) / low_diff_hist_mean)
+                    actual_absolute_diff = abs(low_diff)
                     
+                    # 双重条件判断：差异比率超过阈值 且 绝对差异值大于最低值百分比乘积
+                    if diff_ratio > difference_threshold and actual_absolute_diff > absolute_diff_threshold:
+                        is_diff_anomaly = True
+                        reasons.append(f"与{ref_code}最低值差异异常 (比率: {diff_ratio:.2%}, 绝对差异: {actual_absolute_diff:.2f})")
+                
+                
            
             # 最终判定：同时满足差异异常和振幅异常
             is_anomaly = is_diff_anomaly
@@ -712,10 +756,17 @@ class FatFingerDetector:
         """
         plt.figure(figsize=(15, 10))
         
-        # 创建子图
-        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        # 创建子图，调整为4x1布局
+        fig, axes = plt.subplots(4, 1, figsize=(15, 16))
         
-        # 第一个子图：最低价和最高价趋势
+        # 确保数据按日期排序
+        full_data = full_data.sort_values('date')
+        
+        # 获取统一的日期范围
+        min_date = full_data['date'].min()
+        max_date = full_data['date'].max()
+        
+        # 第一个子图：目标品种最低价和最高价趋势
         ax1 = axes[0]
         if f'{target_code}_low' in full_data.columns:
             ax1.plot(full_data['date'], full_data[f'{target_code}_low'], 
@@ -728,34 +779,43 @@ class FatFingerDetector:
         ax1.set_ylabel('价格', fontsize=12)
         ax1.legend()
         ax1.grid(True)
+        # 统一日期轴范围
+        ax1.set_xlim(min_date, max_date)
+        # 设置日期显示格式
+        ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+        # 自动调整日期标签
+        fig.autofmt_xdate()
         
-        # 第二个子图：最低值差值
+        # 第二个子图：参考品种最低价和最高价趋势（合并到一张图）
         ax2 = axes[1]
         for ref_code in reference_codes:
-            if f'low_diff_{target_code}_{ref_code}' in full_data.columns:
-                ax2.plot(full_data['date'], full_data[f'low_diff_{target_code}_{ref_code}'], 
-                        label=f'{target_code} vs {ref_code} 最低值差值', linestyle='-')
-        
-        # 添加零线
-        ax2.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+            if f'{ref_code}_low' in full_data.columns:
+                ax2.plot(full_data['date'], full_data[f'{ref_code}_low'], 
+                        label=f'{ref_code} 最低价', linestyle='-')
+            if f'{ref_code}_high' in full_data.columns:
+                ax2.plot(full_data['date'], full_data[f'{ref_code}_high'], 
+                        label=f'{ref_code} 最高价', linestyle='-')
         
         # 标记异常事件
         if events_data is not None and not events_data.empty:
             for idx, row in events_data.iterrows():
                 ax2.axvline(x=row['date'], color='red', alpha=0.3, linestyle='--')
         
-        ax2.set_title('目标品种与参考品种的最低值差值', fontsize=14)
-        ax2.set_xlabel('日期', fontsize=12)
-        ax2.set_ylabel('最低值差值', fontsize=12)
+        ax2.set_title('参考品种价格趋势', fontsize=14)
+        ax2.set_ylabel('价格', fontsize=12)
         ax2.legend()
         ax2.grid(True)
+        # 统一日期轴范围和格式，与目标品种图表完全对齐
+        ax2.set_xlim(min_date, max_date)
+        ax2.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
         
-        # 第三个子图：最高值差值
+        # 第三个子图：目标品种与参考品种的最低值差值
         ax3 = axes[2]
         for ref_code in reference_codes:
-            if f'high_diff_{target_code}_{ref_code}' in full_data.columns:
-                ax3.plot(full_data['date'], full_data[f'high_diff_{target_code}_{ref_code}'], 
-                        label=f'{target_code} vs {ref_code} 最高值差值', linestyle='-')
+            if f'low_diff_{target_code}_{ref_code}' in full_data.columns:
+                ax3.plot(full_data['date'], full_data[f'low_diff_{target_code}_{ref_code}'], 
+                        label=f'{target_code} vs {ref_code} 最低值差值', linestyle='-')
         
         # 添加零线
         ax3.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
@@ -765,11 +825,46 @@ class FatFingerDetector:
             for idx, row in events_data.iterrows():
                 ax3.axvline(x=row['date'], color='red', alpha=0.3, linestyle='--')
         
-        ax3.set_title('目标品种与参考品种的最高值差值', fontsize=14)
-        ax3.set_xlabel('日期', fontsize=12)
-        ax3.set_ylabel('最高值差值', fontsize=12)
+        ax3.set_title('目标品种与参考品种的最低值差值', fontsize=14)
+        ax3.set_ylabel('最低值差值', fontsize=12)
         ax3.legend()
         ax3.grid(True)
+        # 统一日期轴范围和格式
+        ax3.set_xlim(min_date, max_date)
+        ax3.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
+        
+        # 第四个子图：目标品种与参考品种的最高值差值
+        ax4 = axes[3]
+        for ref_code in reference_codes:
+            if f'high_diff_{target_code}_{ref_code}' in full_data.columns:
+                ax4.plot(full_data['date'], full_data[f'high_diff_{target_code}_{ref_code}'], 
+                        label=f'{target_code} vs {ref_code} 最高值差值', linestyle='-')
+        
+        # 添加零线
+        ax4.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+        
+        # 标记异常事件
+        if events_data is not None and not events_data.empty:
+            for idx, row in events_data.iterrows():
+                ax4.axvline(x=row['date'], color='red', alpha=0.3, linestyle='--')
+        
+        ax4.set_title('目标品种与参考品种的最高值差值', fontsize=14)
+        ax4.set_xlabel('日期', fontsize=12)
+        ax4.set_ylabel('最高值差值', fontsize=12)
+        ax4.legend()
+        ax4.grid(True)
+        # 统一日期轴范围和格式
+        ax4.set_xlim(min_date, max_date)
+        ax4.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
+        
+        # 确保所有子图共享相同的日期轴属性
+        for ax in [ax1, ax2, ax3, ax4]:
+            # 设置相同的日期刻度间隔
+            ax.xaxis.set_major_locator(plt.matplotlib.dates.AutoDateLocator(minticks=5, maxticks=10))
+            # 保持x轴可见性一致
+            ax.tick_params(axis='x', labelbottom=True)
         
         plt.tight_layout()
         
