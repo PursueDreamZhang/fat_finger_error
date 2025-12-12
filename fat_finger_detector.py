@@ -313,7 +313,7 @@ class FatFingerDetector:
         计算历史平均值（前N天的平均值）
         
         参数:
-        - full_data: 包含差值数据的DataFrame
+        - full_data: 包含差值数据的DataFrame源数据
         - target_code: 目标品种代码
         - reference_codes: 参考品种代码列表
         - window_size: 计算平均值的窗口大小，默认为20天
@@ -321,8 +321,10 @@ class FatFingerDetector:
         返回:
         - DataFrame: 添加了历史平均值列的数据
         """
+
         # 确保数据按日期排序
         full_data = full_data.sort_values('date')
+
         
         # 为每个参考品种计算历史平均值
         for ref_code in reference_codes:
@@ -332,16 +334,8 @@ class FatFingerDetector:
                 # 使用rolling窗口计算前N天的平均值
                 hist_mean_col = f'{high_diff_col}_hist_mean'
                 full_data[hist_mean_col] = full_data[high_diff_col].rolling(
-                    window=window_size, min_periods=1
-                ).mean()
-                
-                # 计算当前值与历史平均值的差异百分比
-                pct_diff_col = f'{high_diff_col}_pct_diff_from_mean'
-                full_data[pct_diff_col] = np.where(
-                    full_data[hist_mean_col] != 0,
-                    (full_data[high_diff_col] - full_data[hist_mean_col]) / abs(full_data[hist_mean_col]) * 100,
-                    0
-                )
+                        window=window_size, min_periods=1
+                    ).mean()
             
             # 计算最低值差异的历史平均值
             low_diff_col = f'low_diff_{target_code}_{ref_code}'
@@ -349,17 +343,8 @@ class FatFingerDetector:
                 # 使用rolling窗口计算前N天的平均值
                 hist_mean_col = f'{low_diff_col}_hist_mean'
                 full_data[hist_mean_col] = full_data[low_diff_col].rolling(
-                    window=window_size, min_periods=1
-                ).mean()
-                
-                # 计算当前值与历史平均值的差异百分比
-                pct_diff_col = f'{low_diff_col}_pct_diff_from_mean'
-                full_data[pct_diff_col] = np.where(
-                    full_data[hist_mean_col] != 0,
-                    (full_data[low_diff_col] - full_data[hist_mean_col]) / abs(full_data[hist_mean_col]) * 100,
-                    0
-                )
-        
+                        window=window_size, min_periods=1
+                    ).mean() 
         return full_data
     
     def calculate_min_max_differences(self, target_data, reference_data_dict, target_code, reference_codes):
@@ -430,15 +415,20 @@ class FatFingerDetector:
         return merged_data
 
     def detect_fat_finger_events(self, target_code, reference_codes, start_date=None, end_date=None,
-                                 difference_threshold=0.1, save_to_csv=True):
+                                 difference_threshold=0.1, save_to_csv=True, window_size=20,
+                                 amplitude_ratio_threshold=2.0):
         """
-        检测乌龙指事件（仅基于价格差异阈值）
+        检测乌龙指事件（基于价格差异阈值和振幅倍数）
 
         此函数实现了以下乌龙指检测逻辑：
         1.  **计算高/低价差值**: 对于目标期货品种和每个参考期货品种，计算它们每日的:
             - 最高价差异: (目标最高价 - 参考最高价) / 目标最低价
             - 最低价差异: (目标最低价 - 参考最低价) / 目标最高价
-        2.  **异常判定**: 如果任一差异的绝对值超过了 `difference_threshold`，则将该日期标记为乌龙指事件。
+        2.  **计算振幅**: 计算目标品种每日的振幅（最高价-最低价）
+        3.  **异常判定**: 
+            - 如果任一差异的绝对值超过了 `difference_threshold`，判定为差异异常
+            - 如果当前振幅超过历史平均振幅的 `amplitude_ratio_threshold` 倍，判定为振幅异常
+            - 只有同时满足差异异常和振幅异常，才将该日期标记为乌龙指事件
 
         参数:
         - target_code: 目标期货品种代码，如 'CU2404'
@@ -447,13 +437,14 @@ class FatFingerDetector:
         - end_date: 结束日期，格式为 'YYYYMMDD'，默认为今天
         - difference_threshold: 差异阈值，用于判断异常。
         - save_to_csv: 是否保存结果到CSV，默认为True。
+        - window_size: 计算历史平均值的窗口大小，默认为20天
+        - amplitude_ratio_threshold: 振幅倍数阈值，当前振幅超过历史平均振幅的倍数，默认为2.0
 
         返回:
         - tuple: (full_data, events_data)
             - full_data (pd.DataFrame): 包含所有计算结果和异常标记的完整数据。
             - events_data (pd.DataFrame): 仅包含被识别为乌龙指事件的日期数据。
         """
-        difference_threshold = difference_threshold / 100
         # 设置默认日期范围
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
@@ -519,7 +510,15 @@ class FatFingerDetector:
         
         # 步骤1.5: 计算历史平均值（前20天的平均值）
         print("步骤1.5: 计算历史平均值（前20天的平均值）...")
-        full_data = self.calculate_historical_averages(full_data, target_code, reference_codes, window_size=20)
+        full_data = self.calculate_historical_averages(full_data, target_code=target_code, reference_codes=reference_codes, window_size=window_size)
+        
+        # 计算目标品种的振幅（最高价-最低价）
+        full_data[f'{target_code}_amplitude'] = full_data[f'{target_code}_high'] - full_data[f'{target_code}_low']
+        
+        # 计算目标品种的历史平均振幅（前N天的平均值）
+        full_data[f'{target_code}_amplitude_avg'] = full_data[f'{target_code}_amplitude'].rolling(
+            window=window_size, min_periods=1
+        ).mean()
 
         # 步骤2: 基于 difference_threshold 检测异常
         print(f"步骤2: 使用差异阈值 {difference_threshold} 检测异常...")
@@ -533,41 +532,42 @@ class FatFingerDetector:
 
         for idx, row in full_data.iterrows():
             reasons = []
-            is_anomaly = False
+            is_diff_anomaly = False
 
             for ref_code in reference_codes:
                 # 检查最高值差异异常
-                target_low = row.get(f'{target_code}_low')
                 high_diff = row.get(f'high_diff_{target_code}_{ref_code}')
                 # 获取前20天最高值差异的平均值
                 high_diff_hist_mean = row.get(f'high_diff_{target_code}_{ref_code}_hist_mean')
                 
                 # 使用历史平均值进行异常检测
-                if pd.notna(target_low) and pd.notna(high_diff) and pd.notna(high_diff_hist_mean) and target_low > 0:
-                    # 方法1: 原始方法 - 直接与阈值比较
-                    if abs((high_diff + high_diff_hist_mean) / target_low) > difference_threshold:
-                        is_anomaly = True
-                        reasons.append(f"与{ref_code}最高值差异异常 (比率: {abs((high_diff + high_diff_hist_mean) / target_low):.2%})")
+                if pd.notna(high_diff) and pd.notna(high_diff_hist_mean) and high_diff_hist_mean != 0:
+                    # 直接与阈值比较
+                    if abs((high_diff - high_diff_hist_mean) / high_diff_hist_mean) > difference_threshold:
+                        is_diff_anomaly = True
+                        reasons.append(f"与{ref_code}最高值差异异常 (比率: {abs((high_diff - high_diff_hist_mean) / high_diff_hist_mean):.2%})")
                     
                 # 检查最低值差异异常
-                target_high = row.get(f'{target_code}_high')
                 low_diff = row.get(f'low_diff_{target_code}_{ref_code}')
                 # 获取前20天最低值差异的平均值
                 low_diff_hist_mean = row.get(f'low_diff_{target_code}_{ref_code}_hist_mean')
-
+                
                 # 使用历史平均值进行异常检测
-                if pd.notna(target_high) and pd.notna(low_diff) and pd.notna(low_diff_hist_mean) and target_high > 0:
-                    # 方法1: 原始方法 - 直接与阈值比较
-                    if abs((low_diff + low_diff_hist_mean) / target_high) > difference_threshold:
-                        is_anomaly = True
-                        reasons.append(f"与{ref_code}最低值差异异常 (比率: {abs((low_diff + low_diff_hist_mean) / target_high):.2%})")
+                if pd.notna(low_diff) and pd.notna(low_diff_hist_mean) and low_diff_hist_mean != 0:
+                    # 直接与阈值比较
+                    if abs((low_diff - low_diff_hist_mean) / low_diff_hist_mean) > difference_threshold:
+                        is_diff_anomaly = True
+                        reasons.append(f"与{ref_code}最低值差异异常 (比率: {abs((low_diff - low_diff_hist_mean) / low_diff_hist_mean):.2%})")
+                
                     
+           
+            # 最终判定：同时满足差异异常和振幅异常
+            is_anomaly = is_diff_anomaly
                   
             if is_anomaly:
                 anomaly_indices.append(idx)
                 anomaly_reasons_list.append("; ".join(reasons))
-                # 重新计算历史平均值（前20天的平均值），计算的时候要排除当前天
-
+        
         # 更新 full_data 中的异常标记和原因
         if anomaly_indices:
             full_data.loc[anomaly_indices, 'is_fat_finger'] = True

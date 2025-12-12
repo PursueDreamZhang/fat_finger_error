@@ -26,17 +26,20 @@ def main():
     
     # 1. 创建检测器实例
     detector = FatFingerDetector()
+    if False:
+        detector.clean_generated_files()
+        return
     
     # 2. 设置参数
-    target_code = "C2409"  # 目标期货品种代码（玉米2403合约）
-    reference_codes = ["C2407", "C2411"]  # 参考期货品种代码列表
-    threshold_pct = 4  # 价格差值差异阈值（百分比）
+    target_code = "TA2512"  # 目标期货品种代码（玉米2403合约）
+    reference_codes = ["TA2601"]  # 参考期货品种代码列表
+    threshold_pct = 5  # 价格差值差异阈值（百分比）
 
-    window = 20  # 历史统计窗口（天数）
+    window = 5  # 历史统计窗口（天数）
     
     # 设置日期范围（使用固定日期范围测试）
-    end_date = "20241231"  # 固定结束日期
-    start_date = "20220101"  # 固定开始日期
+    end_date = "20251212"  # 固定结束日期
+    start_date = "20241116"  # 固定开始日期
     
     print(f"目标品种: {target_code}")
     print(f"参考品种: {', '.join(reference_codes)}")
@@ -58,7 +61,8 @@ def main():
         start_date=start_date,
         end_date=end_date,
         save_to_csv=True,
-        difference_threshold=threshold_pct
+        difference_threshold=threshold_pct,
+        window_size=window
     )
     
     # 4. 检查检测结果
