@@ -31,14 +31,14 @@ def main():
         return
     
     # 2. 设置参数
-    target_code = "TA2512"  # 目标期货品种代码（玉米2403合约）
-    reference_codes = ["TA2601"]  # 参考期货品种代码列表
+    target_code = "TA2601"  # 目标期货品种代码（玉米2403合约）
+    reference_codes = ["TA2602"]  # 参考期货品种代码列表
     threshold_pct = 10  # 价格差值差异阈值（百分比）
 
     window = 5  # 历史统计窗口（天数）
     min_absolute_difference_pct = 1  # 最小绝对差异百分比阈值
     # 设置日期范围（使用固定日期范围测试）
-    end_date = "20251212"  # 固定结束日期
+    end_date = "20251215"  # 固定结束日期
     start_date = "20241116"  # 固定开始日期
     
     print(f"目标品种: {target_code}")

@@ -634,15 +634,19 @@ class FatFingerDetector:
             if not os.path.exists('data/csv_data'):
                 os.makedirs('data/csv_data')
             
-            # 保存完整数据
+            # 保存完整数据，去掉振幅相关的列
             full_data_path = f"data/csv_data/fat_finger_full_{target_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            full_data.to_csv(full_data_path, index=False, encoding='utf-8-sig')
+            # 筛选出不包含'_amplitude'的列
+            columns_to_save = [col for col in full_data.columns if '_amplitude' not in col]
+            full_data[columns_to_save].to_csv(full_data_path, index=False, encoding='utf-8-sig')
             print(f"完整数据已保存到: {full_data_path}")
             
-            # 保存异常事件数据
+            # 保存异常事件数据，同样去掉振幅相关的列
             if not events_data.empty:
                 events_data_path = f"data/csv_data/fat_finger_events_{target_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                events_data.to_csv(events_data_path, index=False, encoding='utf-8-sig')
+                # 筛选出不包含'_amplitude'的列
+                events_columns_to_save = [col for col in events_data.columns if '_amplitude' not in col]
+                events_data[events_columns_to_save].to_csv(events_data_path, index=False, encoding='utf-8-sig')
                 print(f"异常事件数据已保存到: {events_data_path}")
         
         return full_data, events_data
