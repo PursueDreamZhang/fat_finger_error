@@ -634,18 +634,49 @@ class FatFingerDetector:
             if not os.path.exists('data/csv_data'):
                 os.makedirs('data/csv_data')
             
-            # 保存完整数据，去掉振幅相关的列
+            # 保存完整数据，去掉振幅相关的列和多余的参考品种交易量列
             full_data_path = f"data/csv_data/fat_finger_full_{target_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            # 筛选出不包含'_amplitude'的列
-            columns_to_save = [col for col in full_data.columns if '_amplitude' not in col]
+            
+            # 确定要保留的交易量列
+            volume_columns_to_keep = [f'{target_code}_volume']  # 保留目标品种交易量列
+            # 如果有参考品种，保留第一个参考品种的交易量列
+            if reference_codes:
+                first_ref_code = reference_codes[0]
+                first_ref_volume_col = f'{first_ref_code}_volume'
+                volume_columns_to_keep.append(first_ref_volume_col)
+            
+            # 筛选列：
+            # 1. 去掉振幅相关列
+            # 2. 只保留目标品种和第一个参考品种的交易量列
+            # 3. 确保列名唯一，只保留第一次出现的列
+            columns_to_save = []
+            seen_columns = set()
+            for col in full_data.columns:
+                # 去掉振幅相关列
+                if '_amplitude' in col:
+                    continue
+                if col not in seen_columns:
+                    columns_to_save.append(col)
+                    seen_columns.add(col)
             full_data[columns_to_save].to_csv(full_data_path, index=False, encoding='utf-8-sig')
             print(f"完整数据已保存到: {full_data_path}")
             
-            # 保存异常事件数据，同样去掉振幅相关的列
+            # 保存异常事件数据，应用相同的列筛选规则
             if not events_data.empty:
                 events_data_path = f"data/csv_data/fat_finger_events_{target_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                # 筛选出不包含'_amplitude'的列
-                events_columns_to_save = [col for col in events_data.columns if '_amplitude' not in col]
+                # 应用相同的列筛选规则
+                events_columns_to_save = []
+                events_seen_columns = set()
+                for col in events_data.columns:
+                    if '_amplitude' in col:
+                        continue
+                    if '_volume' in col:
+                        if col in volume_columns_to_keep and col not in events_seen_columns:
+                            events_columns_to_save.append(col)
+                            events_seen_columns.add(col)
+                    elif col not in events_seen_columns:
+                        events_columns_to_save.append(col)
+                        events_seen_columns.add(col)
                 events_data[events_columns_to_save].to_csv(events_data_path, index=False, encoding='utf-8-sig')
                 print(f"异常事件数据已保存到: {events_data_path}")
         
