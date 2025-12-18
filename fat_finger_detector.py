@@ -153,7 +153,6 @@ class FatFingerDetector:
                     
                     # 验证数据有效性
                     if not df.empty and len(df) > 0:
-                        print(f"从缓存加载 {len(df)} 条数据记录")
                         return df
                     else:
                         print("缓存数据无效，将重新获取")
@@ -163,7 +162,6 @@ class FatFingerDetector:
                 print(f"读取缓存文件时出错: {e}，将重新获取数据")
         
         # 缓存不存在、已过期或无效，重新获取数据
-        print(f"正在获取期货合约 {future_code} 从 {start_date} 到 {end_date} 的历史数据...")
         
         try:
             # 使用AKShare获取期货历史数据
@@ -194,7 +192,6 @@ class FatFingerDetector:
                             start_dt = pd.to_datetime(start_date)
                             end_dt = pd.to_datetime(end_date)
                         df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-                        print(f"从获取的数据中筛选出 {len(df)} 条符合日期范围的数据")
                 except Exception as e2:
                     print(f"使用futures_zh_daily_sina接口也失败: {e2}")
                     raise Exception(f"所有接口都无法获取期货合约 {future_code} 的数据")
@@ -212,8 +209,6 @@ class FatFingerDetector:
             
             # 添加计算字段
             df = self._add_future_calculated_fields(df)
-            
-            print(f"成功获取 {len(df)} 条数据记录")
             
             # 保存到CSV文件（更新缓存）
             if save_to_csv:
@@ -479,7 +474,6 @@ class FatFingerDetector:
             end_date = datetime.now().strftime('%Y%m%d')
         
         # 获取目标品种数据
-        print(f"获取目标品种 {target_code} 的数据...")
         target_data = self.get_future_data(
             future_code=target_code,
             start_date=start_date,
@@ -496,7 +490,6 @@ class FatFingerDetector:
         # 获取参考品种数据
         reference_data = {}
         for ref_code in reference_codes:
-            print(f"获取参考品种 {ref_code} 的数据...")
             ref_data = self.get_future_data(
                 future_code=ref_code,
                 start_date=start_date,
@@ -518,7 +511,6 @@ class FatFingerDetector:
         print("\n--- 使用基于价格差异阈值的方法检测乌龙指事件 ---")
         
         # 步骤1: 计算目标品种与参考品种的最低值和最高值差值
-        print("步骤1: 计算原始高低价差值...")
         full_data = self.calculate_min_max_differences(
             target_data, reference_data, target_code, reference_codes
         )
@@ -547,7 +539,6 @@ class FatFingerDetector:
                 full_data.rename(columns=rename_dict, inplace=True)
         
         # 步骤1.5: 计算历史平均值（前20天的平均值）
-        print("步骤1.5: 计算历史平均值（前20天的平均值）...")
         full_data = self.calculate_historical_averages(full_data, target_code=target_code, reference_codes=reference_codes, window_size=window_size)
         
         # 计算目标品种的振幅（最高价-最低价）
@@ -559,7 +550,6 @@ class FatFingerDetector:
         ).mean()
 
         # 步骤2: 基于 difference_threshold 检测异常
-        print(f"步骤2: 使用差异阈值 {difference_threshold} 检测异常...")
         
         anomaly_indices = []
         anomaly_reasons_list = []

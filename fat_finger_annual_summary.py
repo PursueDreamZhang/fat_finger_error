@@ -17,7 +17,7 @@ from fat_finger_detector import FatFingerDetector
 # 忽略警告
 warnings.filterwarnings('ignore')
 
-def main(futures_commodity="TA", year=2024, difference_threshold=1.0, window_size=3,
+def main(futures_commodity="TA", year=2023, difference_threshold=1.0, window_size=3,
          amplitude_ratio_threshold=2.0, volume_threshold=10, min_absolute_difference_pct=1.0):
     """
     主函数：对特定期货品种的一整年数据进行乌龙指检测，并生成月度摘要
