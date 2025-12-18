@@ -39,8 +39,9 @@ def main(futures_commodity="TA", year=2024, difference_threshold=1.0, window_siz
     # 创建检测器实例
     detector = FatFingerDetector()
     
-    # 设置日期范围为整个年份
-    start_date = f"{year}0101"
+    # 设置日期范围：开始时间为前一年1月1日，结束时间为当年12月31日
+    # 这是因为期货合约在前一年就开始交易后一年的品种，比如2023年1月就开始交易TA2401
+    start_date = f"{year - 1}0101"
     end_date = f"{year}1231"
     
     # 参考合约为品种连续合约
@@ -65,74 +66,137 @@ def main(futures_commodity="TA", year=2024, difference_threshold=1.0, window_siz
     print(f"- 分析合约: {', '.join(contracts)}")
     print()
     
-    # 收集所有合约的乌龙指事件
-    all_events = []
+    # 收集所有乌龙指事件的关键信息
+    all_events_info = []
     
     print("开始检测乌龙指事件...")
-    for contract_code in contracts:
-        print(f"  处理合约: {contract_code}")
+    
+    for i, contract_code in enumerate(contracts, 1):
+        print(f"  处理合约 {i}/{len(contracts)}: {contract_code}")
         
-        # 检测乌龙指事件（不保存到CSV，提高效率）
-        full_data, events_data = detector.detect_fat_finger_events(
-            target_code=contract_code,
-            reference_codes=reference_codes,
-            start_date=start_date,
-            end_date=end_date,
-            save_to_csv=False,
-            difference_threshold=difference_threshold,
-            window_size=window_size,
-            amplitude_ratio_threshold=amplitude_ratio_threshold,
-            min_absolute_difference_pct=min_absolute_difference_pct,
-            volume_threshold=volume_threshold
-        )
-        
-        if events_data is not None and not events_data.empty:
-            # 添加合约代码到事件数据中，便于交叉引用
-            events_data['contract_code'] = contract_code
-            all_events.append(events_data)
+        try:
+            # 检测乌龙指事件（不保存到CSV，提高效率）
+            full_data, events_data = detector.detect_fat_finger_events(
+                target_code=contract_code,
+                reference_codes=reference_codes,
+                start_date=start_date,
+                end_date=end_date,
+                save_to_csv=False,
+                difference_threshold=difference_threshold,
+                window_size=window_size,
+                amplitude_ratio_threshold=amplitude_ratio_threshold,
+                min_absolute_difference_pct=min_absolute_difference_pct,
+                volume_threshold=volume_threshold
+            )
+            
+            if events_data is not None and not events_data.empty:
+                print(f"    检测到 {len(events_data)} 起事件")
+                
+                # 提取关键信息，避免复杂的合并操作
+                for _, event_row in events_data.iterrows():
+                    event_info = {
+                        'date': event_row.get('date', ''),
+                        'contract_code': contract_code,
+                        'target_code': contract_code
+                    }
+                    all_events_info.append(event_info)
+        except Exception as e:
+            print(f"    处理合约 {contract_code} 时出错: {str(e)}")
+            continue
     
     print()
     
-    # 合并所有事件数据
-    if all_events:
-        combined_events = pd.concat(all_events, ignore_index=True)
-        total_incidents = len(combined_events)
+    # 构建事件数据帧
+    if all_events_info:
+        total_incidents = len(all_events_info)
         print(f"共检测到 {total_incidents} 起潜在的乌龙指事件")
         print()
+        
+        # 创建一个新的数据帧，包含所有事件信息
+        combined_events = pd.DataFrame(all_events_info)
         
         # 转换日期格式，便于按月分组
         combined_events['date_dt'] = pd.to_datetime(combined_events['date'], format='%Y%m%d')
         
-        # 按月份分组统计
-        monthly_stats = combined_events.groupby(combined_events['date_dt'].dt.month).agg({
-            'date': ['count', lambda x: sorted(x.tolist())],
-            'contract_code': lambda x: sorted(set(x.tolist()))
-        })
-        monthly_stats.columns = ['incident_count', 'event_dates', 'involved_contracts']
-        monthly_stats = monthly_stats.sort_index()
+        # 按年月分组统计
+        monthly_stats_dict = {}
+        
+        # 获取所有唯一的年份和月份组合
+        unique_year_months = combined_events['date_dt'].dt.strftime('%Y-%m').unique().tolist()
+        unique_year_months.sort()
+        
+        # 初始化所有月份（包括前一年1月到当年12月）
+        for year_val in [year - 1, year]:
+            for month in range(1, 13):
+                year_month_key = f"{year_val}-{month:02d}"
+                monthly_stats_dict[year_month_key] = {
+                    'year': year_val,
+                    'month': month,
+                    'incident_count': 0,
+                    'involved_contracts': [],
+                    'event_dates': []
+                }
+        
+        # 计算每个年月的统计信息
+        for _, event_row in combined_events.iterrows():
+            year_month_key = event_row['date_dt'].strftime('%Y-%m')
+            year_val = event_row['date_dt'].year
+            month_val = event_row['date_dt'].month
+            
+            # 更新事件数量
+            monthly_stats_dict[year_month_key]['incident_count'] += 1
+            
+            # 更新涉及合约
+            contract_code = event_row['contract_code']
+            if contract_code not in monthly_stats_dict[year_month_key]['involved_contracts']:
+                monthly_stats_dict[year_month_key]['involved_contracts'].append(contract_code)
+            
+            # 更新事件日期
+            monthly_stats_dict[year_month_key]['event_dates'].append(event_row['date'])
+        
+        # 对涉及合约和事件日期进行排序
+        for year_month_key in monthly_stats_dict:
+            monthly_stats_dict[year_month_key]['involved_contracts'].sort()
+            monthly_stats_dict[year_month_key]['event_dates'].sort()
         
         # 生成月度摘要报告
         print("月度摘要报告：")
-        print("-" * 80)
-        print(f"{'月份':<8} {'事件数量':<12} {'涉及合约':<20} {'事件日期':<30}")
-        print("-" * 80)
+        print("-" * 90)
+        print(f"{'年月':<10} {'事件数量':<12} {'涉及合约':<25} {'事件日期':<40}")
+        print("-" * 90)
         
-        for month in range(1, 13):
-            month_name = f"{month:02d}月"
-            
-            if month in monthly_stats.index:
-                stats = monthly_stats.loc[month]
+        # 按年月顺序遍历所有月份（从年前1月到当年12月）
+        for year_val in [year - 1, year]:
+            for month in range(1, 13):
+                year_month_key = f"{year_val}-{month:02d}"
+                stats = monthly_stats_dict[year_month_key]
+                
+                year_month_name = f"{year_val}-{month:02d}"
                 count = stats['incident_count']
-                contracts = ",".join(stats['involved_contracts'])
-                dates = ",".join(stats['event_dates'])
-            else:
-                count = 0
-                contracts = "-"
-                dates = "-"
-            
-            print(f"{month_name:<8} {count:<12} {contracts:<20} {dates:<30}")
-        
-        print("-" * 80)
+                
+                # 处理涉及合约
+                if stats['involved_contracts']:
+                    contracts = ",".join(stats['involved_contracts'])
+                else:
+                    contracts = "-"
+                
+                # 处理事件日期
+                if stats['event_dates']:
+                    # 确保所有日期都是字符串格式
+                    date_strings = []
+                    for dt in stats['event_dates']:
+                        if isinstance(dt, pd.Timestamp):
+                            date_strings.append(dt.strftime('%Y%m%d'))
+                        elif isinstance(dt, str):
+                            date_strings.append(dt)
+                        else:
+                            date_strings.append(str(dt))
+                    dates = ",".join(date_strings)
+                else:
+                    dates = "-"
+                
+                print(f"{year_month_name:<10} {count:<12} {contracts:<25} {dates:<40}")
+        print("-" * 90)
         print()
         print("交叉引用说明：")
         print("如需查看详细数据，请运行fat_finger_example.py并设置：")
