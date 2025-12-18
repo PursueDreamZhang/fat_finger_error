@@ -438,7 +438,8 @@ class FatFingerDetector:
 
     def detect_fat_finger_events(self, target_code, reference_codes, start_date=None, end_date=None,
                                  difference_threshold=0.1, save_to_csv=True, window_size=20,
-                                 amplitude_ratio_threshold=2.0, min_absolute_difference_pct=0.0):
+                                 amplitude_ratio_threshold=2.0, min_absolute_difference_pct=0.0,
+                                 volume_threshold=0.0):
         """
         检测乌龙指事件（基于价格差异阈值和振幅倍数）
 
@@ -451,7 +452,8 @@ class FatFingerDetector:
             - 如果任一差异的绝对值超过了 `difference_threshold`，判定为差异异常
             - 如果当前振幅超过历史平均振幅的 `amplitude_ratio_threshold` 倍，判定为振幅异常
             - 如果差异值的绝对值大于 `min_absolute_difference_pct` 与最低值的乘积，判定为绝对差异异常
-            - 只有同时满足差异异常和振幅异常，才将该日期标记为乌龙指事件
+            - 只有当天实际成交量大于 `volume_threshold` 时，才满足成交量条件
+            - 只有同时满足差异异常、振幅异常和成交量条件，才将该日期标记为乌龙指事件
 
         参数:
         - target_code: 目标期货品种代码，如 'CU2404'
@@ -463,6 +465,7 @@ class FatFingerDetector:
         - window_size: 计算历史平均值的窗口大小，默认为20天
         - amplitude_ratio_threshold: 振幅倍数阈值，当前振幅超过历史平均振幅的倍数，默认为2.0
         - min_absolute_difference_pct: 最低绝对差异百分比，差异值必须大于此百分比与最低值的乘积才被视为异常，默认为0.0
+        - volume_threshold: 期货当天成交量阈值，只有实际成交量大于此值时才满足乌龙指判断的成交量条件，默认为0.0
 
         返回:
         - tuple: (full_data, events_data)
@@ -605,8 +608,26 @@ class FatFingerDetector:
                 
                 
            
-            # 最终判定：同时满足差异异常和振幅异常
-            is_anomaly = is_diff_anomaly
+            # 检查振幅异常
+            is_amplitude_anomaly = False
+            current_amplitude = row.get(f'{target_code}_amplitude')
+            avg_amplitude = row.get(f'{target_code}_amplitude_avg')
+            if pd.notna(current_amplitude) and pd.notna(avg_amplitude) and avg_amplitude > 0:
+                amplitude_ratio = current_amplitude / avg_amplitude
+                if amplitude_ratio > amplitude_ratio_threshold:
+                    is_amplitude_anomaly = True
+                    reasons.append(f"振幅异常 (当前振幅: {current_amplitude:.2f}, 历史平均: {avg_amplitude:.2f}, 倍数: {amplitude_ratio:.2f})")
+            
+            # 检查成交量条件
+            is_volume_ok = False
+            target_volume = row.get(f'{target_code}_volume', 0)
+            if target_volume > volume_threshold:
+                is_volume_ok = True
+            else:
+                reasons.append(f"成交量不满足条件 (当前成交量: {target_volume:.0f}, 阈值: {volume_threshold:.0f})")
+            
+            # 最终判定：同时满足差异异常、振幅异常和成交量条件
+            is_anomaly = is_diff_anomaly and is_volume_ok
                   
             if is_anomaly:
                 anomaly_indices.append(idx)
