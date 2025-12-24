@@ -431,6 +431,8 @@ class FatFingerDetector:
         
         # 生成仅包含参数的缓存文件名
         cache_file_path = f"data/csv_data/data/future_{future_code}_{start_date}_{end_date}.csv"
+        # 空结果标记文件路径（当所有数据源都无法获取数据时创建）
+        empty_marker_path = f"data/csv_data/data/future_{future_code}_{start_date}_{end_date}.empty"
         
         # 创建缓存映射JSON文件路径
         cache_mapping_file = "data/csv_data/data/cache_mapping.json"
@@ -461,6 +463,19 @@ class FatFingerDetector:
             print(f"保存缓存映射文件失败: {e}")
         
         # 检查缓存文件是否存在且有效
+        # 新增：同时检查空结果标记文件，避免重复请求无法获取的数据
+        if use_cache and os.path.exists(empty_marker_path):
+            try:
+                file_mod_time = datetime.fromtimestamp(os.path.getmtime(empty_marker_path))
+                current_time = datetime.now()
+                if (current_time - file_mod_time).days < cache_days:
+                    print(f"缓存命中空结果（所有数据源均无法获取数据）: {empty_marker_path}")
+                    return None
+                else:
+                    print(f"空结果标记已过期（超过{cache_days}天），将重新尝试获取数据")
+            except Exception as e:
+                print(f"检查空结果标记时出错: {e}，将重新尝试获取数据")
+        
         if use_cache and os.path.exists(cache_file_path):
             try:
                 # 获取文件修改时间
@@ -506,8 +521,23 @@ class FatFingerDetector:
                 data_source = "Tushare"
 
         # 检查是否成功获取数据
+        # 新增：当所有数据源都无法获取数据时，将空结果状态写入缓存
         if df is None or df.empty:
             print(f"所有数据源都无法获取期货合约 {future_code} 的数据，请检查期货代码是否正确")
+            # 保存空结果标记到缓存，避免后续重复请求
+            if save_to_csv:
+                try:
+                    with open(empty_marker_path, 'w', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'future_code': future_code,
+                            'start_date': start_date,
+                            'end_date': end_date,
+                            'empty_time': datetime.now().isoformat(),
+                            'message': 'All data sources failed to retrieve data'
+                        }, ensure_ascii=False, indent=2))
+                    print(f"空结果标记已保存到: {empty_marker_path}")
+                except Exception as e:
+                    print(f"保存空结果标记失败: {e}")
             return None
 
         # 筛选日期范围内的数据（确保数据在指定范围内）
@@ -824,7 +854,7 @@ class FatFingerDetector:
             start_date=start_date,
             end_date=end_date,
             save_to_csv=save_to_csv,
-            cache_days=7,
+            cache_days=700,
             use_cache=True
         )
         
@@ -840,7 +870,7 @@ class FatFingerDetector:
                 start_date=start_date,
                 end_date=end_date,
                 save_to_csv=save_to_csv,
-                cache_days=7,
+                cache_days=700,
                 use_cache=True
             )
             

@@ -31,7 +31,7 @@ def main():
         return
     
     # 2. 设置参数
-    target_code = "V2501"  # 目标期货品种代码（玉米2403合约）
+    target_code = "CF2512"  # 目标期货品种代码（玉米2403合约）
     reference_codes = ["V"]  # 参考期货品种代码列表
     threshold_pct = 1  # 价格差值差异阈值（百分比）
     volume_threshold = 10  # 成交量阈值（单位：手）    
