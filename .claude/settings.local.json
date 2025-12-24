@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(\"/Users/zhangchunfu/Nutstore Files/code/python/myenv/bin/python\" test_fix.py)"
+    ]
+  }
+}

@@ -22,6 +22,8 @@ import os
 import warnings
 import json
 import hashlib
+import random
+import time
 warnings.filterwarnings('ignore')
 
 # 导入缓存管理器
@@ -57,10 +59,327 @@ class FatFingerDetector:
             self.cache_manager = None
             print("警告：缓存管理器未初始化，将使用内置缓存功能")
         
-    def get_future_data(self, future_code, start_date=None, end_date=None, save_to_csv=True, 
+    def _convert_to_tushare_code(self, future_code):
+        """
+        将期货代码转换为Tushare格式
+        
+        Tushare格式规则：
+        - 交易所代码：SHF=上期所, DCE=大商所, CZCE=郑商所, CFFEX=中金所, GFEX=广期所
+        - 合约代码：品种代码+交割月份，如 CU2401
+        
+        Args:
+            future_code: 期货合约代码，如 'CU2401'
+            
+        Returns:
+            tuple: (交易所代码, 合约代码)，如 ('SHF', 'CU2401')
+        """
+        # 品种代码到交易所的映射
+        commodity_to_exchange = {
+            # 上期所品种
+            'CU': 'SHF', 'AL': 'SHF', 'ZN': 'SHF', 'PB': 'SHF', 'NI': 'SHF', 'SN': 'SHF',
+            'AU': 'SHF', 'AG': 'SHF', 'RB': 'SHF', 'WR': 'SHF', 'HC': 'SHF', 'SS': 'SHF',
+            'BU': 'SHF', 'RU': 'SHF', 'SP': 'SHF', 'FU': 'SHF',
+            # 大商所品种
+            'A': 'DCE', 'B': 'DCE', 'M': 'DCE', 'Y': 'DCE', 'P': 'DCE', 'C': 'DCE',
+            'CS': 'DCE', 'JD': 'DCE', 'L': 'DCE', 'V': 'DCE', 'PP': 'DCE', 'J': 'DCE',
+            'JM': 'DCE', 'I': 'DCE', 'EG': 'DCE', 'PG': 'DCE', 'EB': 'DCE', 'LH': 'DCE',
+            'FB': 'DCE', 'BB': 'DCE', 'JD': 'DCE',
+            # 郑商所品种
+            'SR': 'CZCE', 'CF': 'CZCE', 'TA': 'CZCE', 'MA': 'CZCE', 'OI': 'CZCE', 'RM': 'CZCE',
+            'ZC': 'CZCE', 'JR': 'CZCE', 'LR': 'CZCE', 'WH': 'CZCE', 'PM': 'CZCE', 'RS': 'CZCE',
+            'RI': 'CZCE', 'JR': 'CZCE', 'SM': 'CZCE', 'SF': 'CZCE', 'UR': 'CZCE', 'SA': 'CZCE',
+            'PK': 'CZCE', 'AP': 'CZCE', 'CJ': 'CZCE', 'FG': 'CZCE', 'CY': 'CZCE',
+            # 中金所品种
+            'IF': 'CFFEX', 'IC': 'CFFEX', 'IH': 'CFFEX', 'IM': 'CFFEX', 'T': 'CFFEX',
+            'TF': 'CFFEX', 'TS': 'CFFEX', 'TL': 'CFFEX',
+            # 广期所品种
+            'SI': 'GFEX', 'LC': 'GFEX'
+        }
+        
+        # 提取品种代码（前1-2位字母）
+        commodity = ''
+        for i in range(1, 3):
+            if i <= len(future_code) and future_code[:i].isalpha():
+                commodity = future_code[:i]
+        
+        if commodity not in commodity_to_exchange:
+            raise ValueError(f"无法识别期货品种代码: {future_code}")
+        
+        exchange = commodity_to_exchange[commodity]
+        return (exchange, future_code)
+    
+    
+    def _fetch_from_tushare(self, future_code, start_date, end_date):
+        """
+        从Tushare获取期货数据
+        
+        Args:
+            future_code: 期货合约代码，如 'CU2401'
+            start_date: 开始日期，格式为 'YYYYMMDD'
+            end_date: 结束日期，格式为 'YYYYMMDD'
+            
+        Returns:
+            DataFrame: 包含期货历史数据的数据框，失败返回None
+        """
+        try:
+            import tushare as ts
+        except ImportError:
+            print("警告：未安装tushare库，无法使用Tushare数据源。请安装：pip install tushare")
+            return None
+        
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 转换为Tushare格式
+                exchange, ts_code = self._convert_to_tushare_code(future_code)
+                
+                # Tushare的ts_code格式为：合约代码.交易所，如 CU2401.SHF
+                full_ts_code = f"{ts_code}.{exchange}"
+                
+                # 初始化tushare（需要设置token）
+                # 如果用户没有设置token，会抛出异常
+                ts.set_token('a737820a2820d5a4446d3b4c958761039c7cd16312ae2cd495d18904')
+                pro = ts.pro_api()
+                
+                # 获取期货日线数据
+                df = pro.fut_daily(ts_code=full_ts_code, 
+                                 start_date=start_date, 
+                                 end_date=end_date)
+                
+                if df is None or df.empty:
+                    print(f"Tushare未获取到期货合约 {future_code} 的数据")
+                    return None
+                
+                # Tushare返回的列名需要转换为标准格式
+                # Tushare列名：trade_date, open, high, low, close, vol, amount, oi
+                # 标准列名：date, open, high, low, close, volume, open_interest
+                
+                # 重命名列
+                column_mapping = {
+                    'trade_date': 'date',
+                    'open': 'open',
+                    'high': 'high',
+                    'low': 'low',
+                    'close': 'close',
+                    'vol': 'volume',
+                    'oi': 'open_interest'
+                }
+                
+                df.rename(columns=column_mapping, inplace=True)
+                
+                # 转换日期格式
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+                
+                print(f"成功从Tushare获取期货合约 {future_code} 的数据，共{len(df)}条记录")
+                return df
+                
+            except Exception as e:
+                error_msg = str(e)
+                # 检查是否是访问频率限制错误
+                if "每分钟最多访问该接口20次" in error_msg:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        import time
+                        wait_time = 60 + random.randint(0, 10)  # 等待60秒+一个10以内的随机数
+                        print(f"Tushare API访问频率限制，错误信息：{error_msg}")
+                        print(f"第 {retry_count}/{max_retries} 次重试，等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)  # 阻塞等待
+                    else:
+                        print(f"Tushare API访问频率限制，已重试 {max_retries} 次，放弃重试")
+                        print(f"最终错误信息：{error_msg}")
+                        return None
+                else:
+                    # 其他类型错误，直接返回
+                    print(f"从Tushare获取数据失败: {error_msg}")
+                    return None
+        
+        return None
+    
+    
+    def _fetch_from_akshare(self, future_code, start_date, end_date):
+        """
+        从AKShare获取期货数据
+
+        Args:
+            future_code: 期货合约代码，如 'CU2401'
+            start_date: 开始日期，格式为 'YYYYMMDD'
+            end_date: 结束日期，格式为 'YYYYMMDD'
+
+        Returns:
+            DataFrame: 包含期货历史数据的数据框，失败返回None
+        """
+        try:
+            import akshare as ak
+        except ImportError:
+            print("错误：未安装akshare库，请先安装：pip install akshare")
+            return None
+
+        df = None
+        last_error = None
+
+        # 尝试使用futures_main_sina接口
+        try:
+            print(f"尝试使用futures_main_sina接口获取 {future_code} 的数据...")
+            df = ak.futures_main_sina(symbol=future_code, start_date=start_date, end_date=end_date)
+
+            # 检查返回结果的有效性
+            if df is not None and not df.empty:
+                # 检查列数是否合理（正常应该有多个列）
+                if len(df.columns) >= 4:
+                    print(f"成功从AKShare(futures_main_sina)获取期货合约 {future_code} 的数据，共{len(df)}条记录")
+                    return df
+                else:
+                    last_error = f"futures_main_sina返回数据列数不足: {len(df.columns)}列"
+                    print(f"警告：{last_error}")
+            else:
+                last_error = "futures_main_sina返回空数据"
+                print(f"警告：{last_error}")
+        except Exception as e:
+            last_error = f"futures_main_sina异常: {str(e)}"
+            print(f"使用futures_main_sina接口失败: {e}")
+
+        # 尝试使用futures_zh_daily_sina接口
+        try:
+            print("尝试使用futures_zh_daily_sina接口获取数据...")
+            # 添加"0"表示主力合约
+            symbol_with_suffix = future_code + "0"
+            print(f"使用完整符号: {symbol_with_suffix}")
+            
+            raw_df = ak.futures_zh_daily_sina(symbol=symbol_with_suffix)
+            
+            # 严格检查返回结果的有效性
+            if raw_df is None:
+                last_error = "futures_zh_daily_sina返回None"
+                print(f"警告：{last_error}")
+            elif not isinstance(raw_df, pd.DataFrame):
+                last_error = f"futures_zh_daily_sina返回非DataFrame类型: {type(raw_df).__name__}"
+                print(f"警告：{last_error}")
+            elif raw_df.empty:
+                last_error = "futures_zh_daily_sina返回空数据"
+                print(f"警告：{last_error}")
+            elif len(raw_df.columns) == 0:
+                last_error = "futures_zh_daily_sina返回无列数据"
+                print(f"警告：{last_error}")
+            else:
+                # 复制数据避免修改原始数据
+                df = raw_df.copy()
+                print(f"futures_zh_daily_sina返回数据，共{len(df)}行，{len(df.columns)}列")
+                
+                # 手动筛选日期范围
+                if 'date' in df.columns:
+                    try:
+                        df['date'] = pd.to_datetime(df['date'])
+                        # 尝试多种日期格式解析
+                        try:
+                            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                        except ValueError:
+                            start_dt = pd.to_datetime(start_date)
+                            end_dt = pd.to_datetime(end_date)
+                        
+                        # 筛选日期范围内的数据
+                        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+                    except Exception as e:
+                        print(f"日期筛选失败: {e}")
+                        last_error = f"日期筛选失败: {str(e)[:50]}"
+                        df = None
+
+                if df is not None and not df.empty:
+                    print(f"成功从AKShare(futures_zh_daily_sina)获取期货合约 {future_code} 的数据，共{len(df)}条记录")
+                    return df
+                else:
+                    last_error = "futures_zh_daily_sina返回空数据（日期筛选后）"
+                    print(f"警告：{last_error}")
+        except (ValueError, IndexError) as e:
+            # 专门处理数据格式错误和索引错误
+            error_str = str(e)
+            if "Length mismatch" in error_str:
+                last_error = f"futures_zh_daily_sina返回数据格式错误: {error_str[:100]}"
+            elif "list index out of range" in error_str:
+                last_error = f"futures_zh_daily_sina接口处理错误: {error_str[:100]}"
+                print(f"警告：{last_error}")
+                print(f"  可能的合约代码 {symbol_with_suffix} 不存在于AKShare数据源中")
+            else:
+                last_error = f"futures_zh_daily_sina异常: {error_str[:100]}"
+            print(f"使用futures_zh_daily_sina接口失败: {e}")
+        except Exception as e:
+            last_error = f"futures_zh_daily_sina异常: {str(e)[:100]}"
+            print(f"使用futures_zh_daily_sina接口失败: {e}")
+
+        print(f"AKShare所有接口都无法获取期货合约 {future_code} 的数据。最后错误: {last_error}")
+        return None
+
+    def _preprocess_akshare_data(self, df):
+        """
+        预处理AKShare返回的数据，标准化列名和格式
+
+        Args:
+            df: AKShare返回的原始数据
+
+        Returns:
+            标准化后的数据
+        """
+        if df is None or df.empty:
+            return df
+
+        # 复制数据避免修改原始数据
+        df = df.copy()
+
+        # AKShare可能返回的列名映射到标准列名
+        column_mappings = [
+            # futures_main_sina返回的列名（最常见）
+            {'开盘价': 'open', '最高价': 'high', '最低价': 'low', '收盘价': 'close', '持仓量': 'open_interest', '成交量': 'volume', '日期': 'date'},
+            # 新浪接口可能的列名
+            {'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'},
+            # 标准格式
+            {'date': 'date', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'},
+            # 其他变体
+            {'日期': 'date', '开盘价': 'open', '最高价': 'high', '最低价': 'low', '收盘价': 'close', '成交量': 'volume'},
+            # Tushare格式
+            {'trade_date': 'date', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'vol': 'volume'},
+        ]
+
+        # 尝试应用列名映射
+        for mapping in column_mappings:
+            try:
+                renamed = False
+                for old_col, new_col in mapping.items():
+                    if old_col in df.columns and new_col not in df.columns:
+                        df[new_col] = df[old_col]
+                        renamed = True
+                # 如果成功映射了某些列，删除原始列（避免重复）
+                if renamed:
+                    for old_col in mapping.keys():
+                        if old_col in df.columns and old_col != mapping.get(old_col, old_col):
+                            df.drop(columns=[old_col], inplace=True)
+                    break  # 成功应用一个映射后退出
+            except Exception:
+                continue
+
+        # 处理日期列，确保格式统一
+        if 'date' in df.columns:
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+            except Exception as e:
+                print(f"日期列转换失败: {e}")
+
+        # 确保必需的列存在
+        required_columns = ['date', 'open', 'high', 'low', 'close']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+
+        if missing_columns:
+            print(f"警告：AKShare数据缺少必需列: {missing_columns}")
+            print(f"实际列名: {list(df.columns)}")
+
+        return df
+
+    def get_future_data(self, future_code, start_date=None, end_date=None, save_to_csv=True,
                         cache_days=10000, use_cache=True):
         """
-        获取指定期货合约的历史数据并保存到本地，支持本地缓存机制
+        获取指定期货合约的历史数据并保存到本地，支持本地缓存机制和双数据源查询
         
         参数:
         - future_code: 期货合约代码，如 'CU2401'（沪铜2401合约）
@@ -72,6 +391,12 @@ class FatFingerDetector:
         
         返回:
         - DataFrame: 包含期货历史数据的数据框
+        
+        数据源优先级:
+        1. 本地缓存（如果启用且有效）
+        2. AKShare库（futures_main_sina接口）
+        3. AKShare库（futures_zh_daily_sina接口）
+        4. Tushare库（备用数据源）
         """
         
         # 导入akshare
@@ -163,95 +488,106 @@ class FatFingerDetector:
         
         # 缓存不存在、已过期或无效，重新获取数据
         
-        try:
-            # 使用AKShare获取期货历史数据
-            try:
-                # 首先尝试使用futures_main_sina接口
-                df = ak.futures_main_sina(symbol=future_code, start_date=start_date, end_date=end_date)
-                if df.empty:
-                    raise Exception("futures_main_sina返回空数据")
-            except Exception as e:
-                print(f"使用futures_main_sina接口失败: {e}")
-                print("尝试使用futures_zh_daily_sina接口获取数据...")
-                
-                # 尝试使用futures_zh_daily_sina接口
-                try:
-                    # 添加"0"表示主力合约
-                    df = ak.futures_zh_daily_sina(symbol=future_code + "0")
-                    if df.empty:
-                        raise Exception("futures_zh_daily_sina返回空数据")
-                    
-                    # 如果使用futures_zh_daily_sina接口，我们需要手动筛选日期范围
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        # 尝试多种日期格式解析
-                        try:
-                            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
-                            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
-                        except:
-                            start_dt = pd.to_datetime(start_date)
-                            end_dt = pd.to_datetime(end_date)
-                        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-                except Exception as e2:
-                    print(f"使用futures_zh_daily_sina接口也失败: {e2}")
-                    raise Exception(f"所有接口都无法获取期货合约 {future_code} 的数据")
-            
-            if df.empty:
-                print(f"未获取到期货合约 {future_code} 的数据，请检查期货代码是否正确")
-                return None
-            
-            # 筛选日期范围内的数据
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-                start_dt = pd.to_datetime(start_date)
-                end_dt = pd.to_datetime(end_date)
-                df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-            
-            # 添加计算字段
-            df = self._add_future_calculated_fields(df)
-            
-            # 保存到CSV文件（更新缓存）
-            if save_to_csv:
-                # 保存数据
-                df.to_csv(cache_file_path, index=False, encoding='utf-8-sig')
-                print(f"数据已保存到: {cache_file_path}")
-            
-            return df
-            
-        except Exception as e:
-            print(f"获取期货数据时出错: {e}")
+        df = None
+        data_source = None
+        
+        # 尝试从AKShare获取数据
+        df = self._fetch_from_akshare(future_code, start_date, end_date)
+        if df is not None and not df.empty:
+            data_source = "AKShare"
+            # 预处理AKShare返回的数据，确保列名标准化
+            df = self._preprocess_akshare_data(df)
+
+        # 如果AKShare失败，尝试从Tushare获取数据
+        if df is None or df.empty:
+            print("AKShare数据源查询失败，尝试切换至Tushare数据源...")
+            df = self._fetch_from_tushare(future_code, start_date, end_date)
+            if df is not None and not df.empty:
+                data_source = "Tushare"
+
+        # 检查是否成功获取数据
+        if df is None or df.empty:
+            print(f"所有数据源都无法获取期货合约 {future_code} 的数据，请检查期货代码是否正确")
             return None
+
+        # 筛选日期范围内的数据（确保数据在指定范围内）
+        if 'date' in df.columns:
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+                start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+            except Exception as e:
+                print(f"日期筛选失败: {e}")
+                # 如果日期筛选失败，返回原始数据
+                pass
+
+        # 检查筛选后的数据是否为空
+        if df.empty:
+            print(f"在指定日期范围内未获取到期货合约 {future_code} 的数据")
+            return None
+
+        # 添加计算字段
+        df = self._add_future_calculated_fields(df)
+        
+        # 保存到CSV文件（更新缓存）
+        if save_to_csv:
+            # 保存数据
+            df.to_csv(cache_file_path, index=False, encoding='utf-8-sig')
+            print(f"数据已保存到: {cache_file_path}（数据源: {data_source}）")
+        
+        return df
     
     def _add_future_calculated_fields(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         添加期货数据计算字段
-        
+
         Args:
             df: 原始期货数据
-            
+
         Returns:
             添加计算字段后的数据
         """
+        # 检查DataFrame是否为空
+        if df is None or df.empty:
+            print("警告：传入的DataFrame为空，无法添加计算字段")
+            return df
+
+        # 检查DataFrame是否有列
+        if len(df.columns) == 0:
+            print("警告：传入的DataFrame没有列，无法添加计算字段")
+            return df
+
         # 复制数据避免修改原始数据
         df = df.copy()
-        
+
         # 处理日期列 - 标准化列名和格式
         date_col = None
         for col in ['日期', 'date', 'Date']:
             if col in df.columns:
                 date_col = col
                 break
-        
+
         if date_col is not None:
-            # 将日期列重命名为'date'并转换为datetime类型
-            df['date'] = pd.to_datetime(df[date_col])
-            # 如果原始列名不是'date'，删除原始列以避免重复
-            if date_col != 'date':
-                df.drop(columns=[date_col], inplace=True)
+            try:
+                # 将日期列重命名为'date'并转换为datetime类型
+                df['date'] = pd.to_datetime(df[date_col])
+                # 如果原始列名不是'date'，删除原始列以避免重复
+                if date_col != 'date':
+                    df.drop(columns=[date_col], inplace=True)
+            except Exception as e:
+                print(f"日期列处理失败: {e}")
+                # 如果处理失败，尝试使用索引创建日期列
+                df['date'] = pd.to_datetime(df.index)
         else:
             # 如果没有日期列，使用索引创建
-            df['date'] = pd.to_datetime(df.index)
-        
+            try:
+                df['date'] = pd.to_datetime(df.index)
+            except Exception as e:
+                print(f"创建日期列失败: {e}")
+                # 如果索引也无法转换，创建一个基于行号的日期列
+                df['date'] = pd.to_datetime(pd.RangeIndex(len(df)))
+
         # 标准化价格列名
         price_columns = {
             '开盘价': 'open',
@@ -261,23 +597,32 @@ class FatFingerDetector:
             '成交量': 'volume',
             '持仓量': 'open_interest'
         }
-        
+
         for chinese_col, english_col in price_columns.items():
             if chinese_col in df.columns and english_col not in df.columns:
-                df[english_col] = df[chinese_col]
-                # 删除原始中文列以避免重复
-                df.drop(columns=[chinese_col], inplace=True)
-        
+                try:
+                    df[english_col] = df[chinese_col]
+                    # 删除原始中文列以避免重复
+                    df.drop(columns=[chinese_col], inplace=True)
+                except Exception as e:
+                    print(f"列转换失败 {chinese_col} -> {english_col}: {e}")
+
         # 确保数值列为float类型
         numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'open_interest']
         for col in numeric_columns:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                except Exception as e:
+                    print(f"数值列转换失败 {col}: {e}")
+
         # 添加"最高价-最低价差值"列
         if 'high' in df.columns and 'low' in df.columns:
-            df['最高价-最低价差值'] = df['high'] - df['low']
-        
+            try:
+                df['最高价-最低价差值'] = df['high'] - df['low']
+            except Exception as e:
+                print(f"计算最高价-最低价差值失败: {e}")
+
         return df
     
     def calculate_price_spread(self, data):
@@ -651,7 +996,7 @@ class FatFingerDetector:
             # 确定要保留的交易量列
             volume_columns_to_keep = [f'{target_code}_volume']  # 保留目标品种交易量列
             # 如果有参考品种，保留第一个参考品种的交易量列
-            if reference_codes:
+            if reference_codes and len(reference_codes) > 0:
                 first_ref_code = reference_codes[0]
                 first_ref_volume_col = f'{first_ref_code}_volume'
                 volume_columns_to_keep.append(first_ref_volume_col)
