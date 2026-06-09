@@ -435,12 +435,12 @@ if __name__ == "__main__":
     
     # 使用多品种分析函数进行测试
     # 示例1：分析单个品种的多个年份
-    # analyze_multiple_commodities(commodities=["jd"], years=[2022, 2023, 2024, 2025])
+     analyze_multiple_commodities(commodities=["JD"], years=[2022, 2023, 2024, 2025])
     
     # 示例2：分析多个品种的单个年份
-    # analyze_multiple_commodities(commodities=["PP", "TA", "jd"], years=[2023]) 
+    # analyze_multiple_commodities(commodities=["PP", "TA", "JD"], years=[2023]) 
     # ["CS", "TA", "C","M","RM","FG","PP","SF","SM","RB","HC","BU","FU","V", "JD", "EG", "SR", "SA", "Y", "P", "CF"]
     
     # 示例3：分析多个品种的多个年份
-    analyze_multiple_commodities(commodities=["CS", "TA", "C","M","RM","FG","PP","SF","SM","RB","HC","BU","FU","V", "JD", "EG", "SR", "SA", "Y", "P", "CF"], years=[2022, 2023, 2024, 2025])
+    # analyze_multiple_commodities(commodities=["CS", "TA", "C","M","RM","FG","PP","SF","SM","RB","HC","BU","FU","V", "JD", "EG", "SR", "SA", "Y", "P", "CF"], years=[2022, 2023, 2024, 2025])
     
