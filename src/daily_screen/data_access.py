@@ -107,6 +107,7 @@ def load_commodity_data(
 
     if all_daily_frames:
         daily_bar = pd.concat(all_daily_frames, ignore_index=True)
+        daily_bar = daily_bar.drop_duplicates(subset=["commodity", "contract", "trade_date"], keep="last").reset_index(drop=True)
         daily_bar = daily_bar.sort_values(["commodity", "contract", "trade_date"]).reset_index(drop=True)
         daily_bar = daily_bar.loc[
             (daily_bar["trade_date"] >= pd.to_datetime(expanded_start_date, format="%Y%m%d"))
@@ -681,7 +682,11 @@ def _standardize_daily(raw_df: pd.DataFrame, contract_code: str) -> pd.DataFrame
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     for column in ["open", "high", "low", "close", "volume", "pre_close"]:
         if column in df.columns:
-            df[column] = pd.to_numeric(df[column], errors="coerce")
+            col_data = df[column]
+            # 处理重复列名的情况（取第一列）
+            if isinstance(col_data, pd.DataFrame):
+                col_data = col_data.iloc[:, 0]
+            df[column] = pd.to_numeric(col_data, errors="coerce")
         else:
             df[column] = pd.NA
 

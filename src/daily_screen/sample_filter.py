@@ -88,6 +88,7 @@ def assign_sample_status(daily_bar: pd.DataFrame, contract_meta: pd.DataFrame) -
         reference_status = (
             df.loc[:, ["commodity", "trade_date", "contract", "sample_status"]]
             .rename(columns={"contract": "main_reference_contract", "sample_status": "main_reference_status"})
+            .drop_duplicates(subset=["commodity", "trade_date", "main_reference_contract"])
         )
         df = df.merge(
             reference_status,

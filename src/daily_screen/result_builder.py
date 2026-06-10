@@ -113,7 +113,14 @@ def build_results(df: pd.DataFrame, symbols: list[str], start_date: str, end_dat
             ["commodity", "trade_date", "candidate_score"],
             ascending=[True, True, False],
         ).reset_index(drop=True)
-        suspicious_dates = out.loc[out["candidate_level"] != "none", [
+        volume_pass = (
+            (out["candidate_level"] != "none")
+            & (
+                out["peer_volume_median"].isna()
+                | (out["volume"] >= 0.1 * out["peer_volume_median"])
+            )
+        )
+        suspicious_dates = out.loc[volume_pass, [
             "detail_id",
             "commodity",
             "contract",
