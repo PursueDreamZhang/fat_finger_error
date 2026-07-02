@@ -18,8 +18,7 @@ def analyze_commodities(
     end_date,
     output_dir: str | None = None,
     *,
-    cache_dir: str | Path = "data/csv_data/data",
-    config_path: str | Path = "config/local_config.json",
+    data_dir: str | Path = "data/1d_futures",
 ):
     normalized_symbols = _normalize_symbols(symbols)
     _validate_dates(start_date, end_date)
@@ -31,8 +30,7 @@ def analyze_commodities(
         normalized_symbols,
         start_date,
         end_date,
-        cache_dir=cache_dir,
-        config_path=config_path,
+        data_dir=data_dir,
     )
     daily_bar = loaded["daily_bar"]
     contract_meta = loaded["contract_meta"]
