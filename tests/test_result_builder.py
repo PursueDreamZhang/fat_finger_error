@@ -19,6 +19,8 @@ def test_build_results_outputs_suspicious_dates_table():
             "active_peer_count": [3, 0],
             "peer_comparability_weak_flag": [False, False],
             "target_liquidity_weak_flag": [False, False],
+            "volume": [10000, 10000],
+            "peer_volume_median": [9000, 9000],
         }
     )
 
@@ -46,6 +48,8 @@ def test_build_results_outputs_commodity_summary():
             "active_peer_count": [2],
             "peer_comparability_weak_flag": [False],
             "target_liquidity_weak_flag": [False],
+            "volume": [10000],
+            "peer_volume_median": [9000],
         }
     )
 

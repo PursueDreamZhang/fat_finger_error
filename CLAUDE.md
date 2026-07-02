@@ -23,9 +23,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 运行测试
 ```bash
-./venv/bin/pytest tests/
-./venv/bin/pytest tests/test_scoring.py  # 单个测试文件
-./venv/bin/pytest tests/test_scoring.py::test_function_name  # 单个测试
+./venv/bin/python -m pytest tests/
+./venv/bin/python -m pytest tests/test_scoring.py  # 单个测试文件
+./venv/bin/python -m pytest tests/test_scoring.py::test_function_name  # 单个测试
 ```
 
 ## 架构
