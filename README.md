@@ -63,49 +63,25 @@
 
 可以把它理解成：
 
-`输入品种和日期 -> 拉数据和补缓存 -> 标记主参考 -> 判定样本状态 -> A/C/E 评分 -> 构造结果 -> 输出 HTML/CSV/JSON`
+`输入品种和日期 -> 读本地 parquet -> 标记主参考 -> 判定样本状态 -> A/C/E 评分 -> 构造结果 -> 输出 HTML/CSV/JSON`
 
 ## 4. 数据从哪里来
 
 当前数据层在：
 
-- [data_access.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/data_access.py:1)
+- [data_access.py](src/daily_screen/data_access.py:1)
 
-### 4.1 元数据与日线数据源
+### 数据源
 
-当前默认顺序是：
+本地 parquet 数据集，目录 `data/1d_futures/`，布局 `{年份}/{YYYYMMDD}.parquet`，每个文件为某交易日全市场合约。无在线拉取，无缓存补缺口。
 
-1. **Tushare**
-   - 用于合约发现、合约元数据、日线数据
-2. **AKShare**
-   - 作为回退数据源，用于日线补拉
+字段：`code`（带交易所后缀，如 `A2501.DCE`）、`date`、`pre_close`、`pre_settle`、`open`、`high`、`low`、`close`、`settle`、`vol` 等。loader 解析 `code` 得品种/合约，滤除连续合约（无月份后缀，如 `A.DCE`）。
 
-### 4.2 本地配置
+依赖：需 `pyarrow`（见 `requirements.txt`）。
 
-Tushare token 读取自：
+### 日期区间
 
-- [config/local_config.json](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/config/local_config.json:1)
-
-### 4.3 缓存策略
-
-缓存目录默认是：
-
-- `data/csv_data/data/`
-
-特点：
-
-- 支持多缓存文件命中
-- 支持缺口区间增量补拉
-- 支持把旧缓存和新补数据合并成一份更大的缓存文件
-- 支持 `.empty` 空标记，避免对已确认无数据区间重复联网
-
-### 4.4 历史缓冲
-
-为了支持样本状态和评分窗口，程序会把用户开始日期向前扩一段缓冲再取数。
-
-当前实现：
-
-- 向前扩 `45` 个自然日
+`start_date` 向前扩 45 自然日（`TRADING_LOOKBACK_BUFFER_DAYS`）作为历史缓冲，供滚动分位数使用。合约上市/到期日取自 parquet 全历史（不受分析窗口截断）。
 
 ## 5. 当前评分思想
 
@@ -160,8 +136,8 @@ candidate_score = min(100, max(0, candidate_score))
   - 命令行入口
 - [src/daily_screen/pipeline.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/pipeline.py:1)
   - 主流程编排
-- [src/daily_screen/data_access.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/data_access.py:1)
-  - 数据访问、缓存、补数
+- [src/daily_screen/data_access.py](src/daily_screen/data_access.py:1)
+  - 读本地 parquet 数据
 - [src/daily_screen/sample_filter.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/sample_filter.py:1)
   - 无效样本判定
 - [src/daily_screen/scoring.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/scoring.py:1)
@@ -201,7 +177,7 @@ candidate_score = min(100, max(0, candidate_score))
 当前仓库已经具备：
 
 - 输入品种编码和日期区间，自动发现相关合约
-- 自动拉取日线数据并做缓存增量补数
+- 从本地 parquet 读取日线
 - 基于样本状态和 `A/C/E` 评分筛查可疑日期
 - 输出 HTML 报告、CSV 明细和 JSON 结构化结果
 - 保留无效样本并解释“为什么这条样本不能正式判断”

@@ -5,9 +5,9 @@
 这份文档用于代码交接，目标是把**当前实际生效的日线初筛实现**完整串起来，回答下面几个问题：
 
 - 用户从哪里输入参数
-- 数据从哪里拉取
-- 拉取失败时如何重试和降级
-- 本地缓存怎么命中、补缺、回写
+- 数据从本地 parquet 哪里读取
+- 读取失败时如何报错
+- 本地 parquet 数据如何进入分析链路
 - 数据进入分析后经历了哪些处理
 - 最终如何形成“可疑日期”和“无效样本”
 - HTML、CSV、JSON 是由哪些文件和函数生成的
@@ -85,7 +85,7 @@
 
 主函数：
 
-- `analyze_commodities(symbols, start_date, end_date, output_dir=None, cache_dir="data/csv_data/data", config_path="config/local_config.json")`
+- `analyze_commodities(symbols, start_date, end_date, output_dir=None, data_dir="data/1d_futures")`
 
 它做三类事情：
 
@@ -102,317 +102,57 @@
 - `_resolve_output_dir(...)`
   - 若用户未传目录，则自动创建 `output/<timestamp>-<symbols>/`
 
-## 4. 数据获取层：从哪里拉数据，怎么拉
+## 4. 数据获取层：从本地 parquet 读取
 
 ### 4.1 核心文件
 
 文件：
+- [data_access.py](src/daily_screen/data_access.py)
 
-- [data_access.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/data_access.py:1)
+职责（纯本地读取，无在线拉取、无缓存补缺口、无空标记）：
+- 扫描本地 parquet 数据集
+- 解析合约代码、过滤目标品种、滤除连续合约
+- 构造 `daily_bar` 与 `contract_meta`
 
-这是整条链路里最复杂的一层，负责：
+### 4.2 数据源
 
-- 读取本地配置
-- 发现合约
-- 读取本地缓存
-- 计算缺失区间
-- 从远程增量补数
-- 合并缓存并回写
-- 构造 `daily_bar` 和 `contract_meta`
+本地 parquet 数据集，目录 `data/1d_futures/`，布局 `{年份}/{YYYYMMDD}.parquet`，每个文件为某交易日全市场合约。依赖 `pyarrow`（见 `requirements.txt`）。
 
-### 4.2 读取本地配置
+字段（节选）：`code`（带交易所后缀，如 `A2501.DCE`）、`date`、`pre_close`、`pre_settle`、`open`、`high`、`low`、`close`、`vol`。
 
-函数：
-
-- `load_local_config(config_path="config/local_config.json")`
-
-读取的配置文件：
-
-- [config/local_config.json](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/config/local_config.json:1)
-
-当前只关心一个字段：
-
-- `tushare_token`
+`code` 解析：去后缀得 contract（`A2501`）、正则 `^[A-Z]+` 得 commodity（`A`）；仅保留 `[A-Z]+\d{3,4}` 的具体月合约，连续合约（`A.DCE`/`AG.SHF`，无月份后缀）自动滤除。
 
 ### 4.3 为什么会向前扩窗
 
-函数：
+函数 `_expand_start_date(start_date)`，常量 `TRADING_LOOKBACK_BUFFER_DAYS = 45`。用户分析 `[start_date, end_date]`，取数时向前扩 45 自然日作为缓冲，供样本状态判定与评分的滚动窗口使用（避免分析起点被判历史不足）。
 
-- `_expand_start_date(start_date)`
-
-当前常量：
-
-- `TRADING_LOOKBACK_BUFFER_DAYS = 45`
-
-含义：
-
-- 用户要分析 `start_date ~ end_date`
-- 取数时不会只拉用户区间
-- 而是会把开始日期向前多扩 `45` 个自然日
-
-原因：
-
-- 样本状态和评分都依赖历史窗口
-- 当前历史窗口是“向前 20 个有效样本，至少要 10 个有效样本”
-- 所以必须提前多拉一段缓冲数据，避免分析起点附近全部被打成历史不足
-
-### 4.4 先拉元数据，再发现合约
+### 4.4 主函数与两遍扫描
 
 主函数：
+- `load_commodity_data(symbols, start_date, end_date, *, data_dir=”data/1d_futures”)`
 
-- `load_commodity_data(symbols, start_date, end_date, ...)`
+返回 `{daily_bar, contract_meta}`。两遍扫描：
 
-对每个品种 `symbol`，先调用：
+**Pass A —— 全历史 meta 边界**（`_scan_contract_date_bounds`）：扫描 `data_dir` 下全部年份，只读 `[code, date]` 两列，流式聚合每合约全局 `min`/`max(trade_date)`。保证 `listed_date`/`last_trade_date` 是合约在数据集内的真实首/末日，不受分析窗口截断——否则下游 `sample_filter` 的 `invalid_lifecycle_edge` 会被窗口边界误伤。
 
-- `_load_symbol_meta(...)`
+**Pass B —— 窗口 daily_bar**（`_build_daily_bar` + `_standardize_daily`）：仅读文件名日期落在 `[expanded_start_date, end_date]` 的 parquet，取 OHLC 必要列；解析 `code`、过滤品种、映射列类型；按 `[commodity, contract, trade_date]` 去重；最后按解析后的 `trade_date` 再裁一次（防文件内行日期与文件名不一致的脏数据越界）。
 
-它的逻辑是：
+### 4.5 pre_close 容错链
 
-1. 先读本地缓存的 `contract_meta_{symbol}.csv`
-2. 如果缓存里已有覆盖目标区间的元数据，就优先用缓存
-3. 否则尝试从 Tushare 拉
-4. 如果 Tushare 拉不到，再退回 AKShare 补元数据
+`pre_close ?? pre_settle ?? 前一日 close`，其中”前一日 close”按合约分组取：`df.groupby([“commodity”,”contract”])[“close”].shift(1)`（杜绝跨合约污染）。parquet 实测 `pre_close` 基本都有值，此链为防御性兜底，避免制造 `pre_close<=0` 的无效样本。
 
-元数据相关函数：
+### 4.6 contract_meta 组装
 
-- `_load_cached_meta(...)`
-- `_write_meta_cache(...)`
-- `_filter_meta_by_date(...)`
-- `_fetch_symbol_meta_from_tushare(...)`
-- `_fetch_symbol_meta_from_akshare(...)`
-- `_standardize_meta(...)`
+`_build_contract_meta`：对 daily_bar 中出现的每个合约，从 Pass A 的全历史边界取 `listed_date`/`last_trade_date`；`delivery_month` 由合约代码末尾数字提取。
 
-#### Tushare 元数据接口
+### 4.7 失败处理
 
-函数：
-
-- `_fetch_symbol_meta_from_tushare(...)`
-
-内部调用：
-
-- `pro.fut_basic(...)`
-
-拿到的核心字段会被标准化为：
-
-- `commodity`
-- `contract`
-- `listed_date`
-- `last_trade_date`
-- `delivery_month`
-- `ts_code`
-
-#### AKShare 元数据补位逻辑
-
-函数：
-
-- `_fetch_symbol_meta_from_akshare(...)`
-
-注意：
-
-- 这里不是直接联网去 AKShare 拉“完整历史合约列表”
-- 而是退回到**本地已存在缓存文件名**，再反推出已有合约
-- 如果本地完全没有这个品种的缓存，AKShare 这条元数据补位路径可能拿不到东西
-
-### 4.5 合约发现逻辑
-
-函数：
-
-- `_discover_contracts_for_symbol(symbol, meta_df, cache_dir)`
-
-合约来源有三部分：
-
-1. 元数据表中的 `contract`
-2. 本地缓存目录里 `future_<contract>_<start>_<end>.csv`
-3. 本地空标记文件 `future_<contract>_<start>_<end>.empty`
-
-也就是说，当前的“合约发现”不是只靠单一远程源，而是：
-
-- 元数据
-- 本地缓存
-- 空标记
-
-三者并集。
-
-### 4.6 单合约日线如何加载
-
-函数：
-
-- `_load_contract_daily_with_cache(...)`
-
-这是数据层的核心函数。
-
-它的处理顺序是：
-
-1. 找出该合约所有已有缓存文件
-2. 读取这些缓存文件
-3. 合并为一份缓存数据
-4. 根据用户需要区间计算缺失区间
-5. 对每个缺失区间判断是否已经被 `.empty` 标记覆盖
-6. 若未覆盖，则远程拉取
-7. 拉到后与缓存合并
-8. 把合并后的全量区间写回成一个更大的缓存文件
-9. 删除旧的小缓存文件
-10. 最后再裁剪回当前所需分析区间
-
-相关函数：
-
-- `_list_contract_cache_files(...)`
-- `_load_cached_contract_file(...)`
-- `_merge_daily_frames(...)`
-- `_calculate_missing_ranges(...)`
-- `_list_contract_empty_ranges(...)`
-- `_is_range_covered_by_empty_marker(...)`
-- `_rewrite_contract_cache(...)`
-
-### 4.7 缺失区间怎么补
-
-函数：
-
-- `_calculate_missing_ranges(required_start, required_end, covered_ranges)`
-
-逻辑不是“缓存不完全就全量重拉”，而是：
-
-- 先看当前已有缓存覆盖了哪些日期区间
-- 只把真正缺口区间找出来
-- 只对缺口远程补数
-
-例如已经有：
-
-- `future_AU2606_20230101_20240401.csv`
-- `future_AU2606_20250101_20260401.csv`
-
-如果这次需要：
-
-- `20230501 ~ 20251201`
-
-那么系统不会重拉整段，而是只补中间缺的那一段，再把旧缓存和新补的数据合并成新的大文件。
-
-### 4.8 空标记文件的作用
-
-函数：
-
-- `_write_empty_marker(...)`
-
-文件格式：
-
-- `future_<contract>_<start>_<end>.empty`
-
-含义：
-
-- 某个缺失区间已经尝试联网拉过
-- 但远程没有拿到数据
-
-后续再次分析时，如果这个缺口完全被 `.empty` 覆盖，就不会重复联网拉这一段。
-
-### 4.9 远程日线拉取顺序
-
-函数：
-
-- `_fetch_contract_daily_remote(...)`
-
-执行顺序：
-
-1. 优先 Tushare
-2. Tushare 重试 `2` 次
-3. 还失败则切换 AKShare
-
-相关常量：
-
-- `TUSHARE_RETRY_TIMES = 2`
-
-#### Tushare 日线接口
-
-函数：
-
-- `_fetch_contract_daily_from_tushare(...)`
-
-内部调用：
-
-- `pro.fut_daily(...)`
-
-要求：
-
-- 本地配置里有 `tushare_token`
-- 该合约有对应 `ts_code`
-
-另外，函数内部会调用：
-
-- `_prepare_tushare_home()`
-
-它会把 `HOME` 指向：
-
-- `.runtime/tushare_home`
-
-原因：
-
-- 避免 Tushare 在当前环境里把运行时文件写到系统 `HOME` 出问题
-
-#### AKShare 日线接口
-
-函数：
-
-- `_fetch_contract_daily_from_akshare(...)`
-
-内部调用：
-
-- `ak.futures_zh_daily_sina(symbol=...)`
-
-它会先尝试：
-
-- 大写合约代码
-
-不行再试：
-
-- 小写合约代码
-
-### 4.10 日线标准化
-
-函数：
-
-- `_standardize_daily(raw_df, contract_code)`
-
-职责：
-
-- 统一不同数据源字段名
-- 转换数值类型
-- 增加 `commodity`、`contract`
-- 按日期排序
-- 自动补 `pre_close`
-
-注意这里有一条关键逻辑：
-
-- 若原始数据没有 `pre_close`
-- 则用 `close.shift(1)` 补
-
-最终保留字段由 [schemas.py](/Users/zhangchunfu/Nutstore%20Files/code/python/fat_finger_error/src/daily_screen/schemas.py:1) 约束：
-
-- `trade_date`
-- `commodity`
-- `contract`
-- `open`
-- `high`
-- `low`
-- `close`
-- `pre_close`
-- `volume`
-
-### 4.11 数据层最终产出什么
-
-`load_commodity_data(...)` 最终返回两张表：
-
-1. `daily_bar`
-   - 所有品种、所有合约、所有交易日的日线明细
-2. `contract_meta`
-   - 合约元数据
-
-其中 `daily_bar` 已经被裁剪回：
-
-- `扩窗后的 start_date ~ end_date`
-
-也就是：
-
-- 前面多取了一段缓冲
-- 后面分析时依然能看到这段历史
+按场景抛清晰错误（不让 pyarrow 底层异常裸抛）：
+- `data_dir` 不存在 → `FileNotFoundError`（带路径）
+- `data_dir` 是文件不是目录 → `NotADirectoryError`
+- 年份目录名非 4 位数字 → `ValueError`（带目录名）
+- `{year}/` 下 `.parquet` 文件名非 `YYYYMMDD.parquet` → `ValueError`（带 file_path）
+- 单个 parquet 内容读不出 → `RuntimeError`，带 `file_path`/`pass`(A/B)/`file_date`，Pass B 阶段额外带 `symbols`
 
 ## 5. 主参考合约标注
 

@@ -37,8 +37,7 @@ case $END_DATE in
     ;;
 esac
 
-HOME="$REPO_DIR/.runtime/tushare_home" \
-  "$REPO_DIR/venv/bin/python" "$REPO_DIR/run_daily_screen.py" \
+"$REPO_DIR/venv/bin/python" "$REPO_DIR/run_daily_screen.py" \
   --symbols "$SYMBOL" \
   --start-date "$START_DATE" \
   --end-date "$END_DATE"
