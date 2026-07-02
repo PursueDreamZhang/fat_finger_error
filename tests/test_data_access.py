@@ -1,188 +1,174 @@
+from __future__ import annotations
+
 import pandas as pd
+import pytest
 
-from src.daily_screen.data_access import (
-    _fill_meta_dates_from_daily,
-    _list_contract_cache_files,
-    load_commodity_data,
-)
+from src.daily_screen.data_access import load_commodity_data
+from src.daily_screen.schemas import REQUIRED_DAILY_COLUMNS, REQUIRED_META_COLUMNS
 
 
-def test_load_commodity_data_returns_daily_bar_and_contract_meta(cache_dir, config_path, sample_contract_cache):
-    result = load_commodity_data(
-        symbols=["AU"],
-        start_date="20240101",
-        end_date="20240201",
-        cache_dir=cache_dir,
-        config_path=config_path,
-    )
-
-    assert "daily_bar" in result
-    assert "contract_meta" in result
-    assert not result["daily_bar"].empty
-    assert not result["contract_meta"].empty
+def _write_day(tmp_path, year: int, date: str, rows: list[dict]) -> None:
+    year_dir = tmp_path / str(year)
+    year_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(year_dir / f"{date}.parquet")
 
 
-def test_load_commodity_data_keeps_only_requested_symbols(cache_dir, config_path, sample_contract_cache):
-    result = load_commodity_data(
-        symbols=["JD"],
-        start_date="20240101",
-        end_date="20240201",
-        cache_dir=cache_dir,
-        config_path=config_path,
-    )
-
-    assert set(result["daily_bar"]["commodity"].unique()) <= {"JD"}
+_UNSET = object()
 
 
-def test_load_commodity_data_uses_fallback_contracts_when_meta_lookup_is_empty(
-    cache_dir,
-    config_path,
-    monkeypatch,
-):
-    import src.daily_screen.data_access as data_access
-
-    monkeypatch.setattr(data_access, "_fetch_symbol_meta_from_tushare", lambda symbol, config: pd.DataFrame())
-    monkeypatch.setattr(data_access, "_fetch_symbol_meta_from_akshare", lambda symbol, cache_dir: pd.DataFrame())
-    monkeypatch.setattr(
-        data_access,
-        "_discover_contracts_from_fallback_source",
-        lambda symbol, start_date, end_date: ["JD2501"],
-    )
-
-    def fake_daily_loader(*, contract_code, start_date, end_date, cache_dir, config, meta_row):
-        assert contract_code == "JD2501"
-        return pd.DataFrame(
-            {
-                "trade_date": pd.to_datetime(["2024-01-29", "2024-01-30"]),
-                "commodity": ["JD", "JD"],
-                "contract": ["JD2501", "JD2501"],
-                "open": [3601.0, 3688.0],
-                "high": [3761.0, 3689.0],
-                "low": [3601.0, 3652.0],
-                "close": [3678.0, 3657.0],
-                "pre_close": [3684.0, 3678.0],
-                "volume": [758.0, 342.0],
-            }
-        )
-
-    monkeypatch.setattr(data_access, "_load_contract_daily_with_cache", fake_daily_loader)
-
-    result = load_commodity_data(
-        symbols=["JD"],
-        start_date="20240101",
-        end_date="20240201",
-        cache_dir=cache_dir,
-        config_path=config_path,
-    )
-
-    assert list(result["contract_meta"]["contract"]) == ["JD2501"]
-    assert result["contract_meta"].iloc[0]["listed_date"] == "2024-01-29"
-    assert result["contract_meta"].iloc[0]["last_trade_date"] == "2024-01-30"
-    assert list(result["daily_bar"]["contract"].unique()) == ["JD2501"]
+def _row(code, date, close, *, pre_close=_UNSET, pre_settle=_UNSET, open_=_UNSET, high=_UNSET, low=_UNSET, vol=1000):
+    # 用哨兵 _UNSET 区分"未传 → 默认 close"与"显式 None → 写 NaN(用于测 pre_close 回填)"
+    return {
+        "code": code,
+        "date": date,
+        "pre_close": close if pre_close is _UNSET else pre_close,
+        "pre_settle": close if pre_settle is _UNSET else pre_settle,
+        "open": close if open_ is _UNSET else open_,
+        "high": close + 1 if high is _UNSET else high,
+        "low": close - 1 if low is _UNSET else low,
+        "close": close,
+        "vol": vol,
+    }
 
 
-def test_fill_meta_dates_from_daily_keeps_missing_dates_without_crashing():
-    meta_df = pd.DataFrame(
-        {
-            "commodity": ["TA", "TA"],
-            "contract": ["TA2401", "TA2402"],
-            "listed_date": [pd.NaT, pd.NaT],
-            "last_trade_date": [pd.NaT, pd.NaT],
-            "delivery_month": ["2401", "2402"],
-            "ts_code": [None, None],
-        }
-    )
-    daily_frames = [
-        pd.DataFrame(
-            {
-                "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-                "commodity": ["TA", "TA"],
-                "contract": ["TA2401", "TA2401"],
-                "open": [1.0, 1.0],
-                "high": [1.0, 1.0],
-                "low": [1.0, 1.0],
-                "close": [1.0, 1.0],
-                "pre_close": [1.0, 1.0],
-                "volume": [1.0, 1.0],
-            }
-        )
-    ]
-
-    filled = _fill_meta_dates_from_daily(meta_df, daily_frames)
-
-    assert filled.loc[filled["contract"] == "TA2401", "listed_date"].iloc[0] == "2024-01-02"
-    assert pd.isna(filled.loc[filled["contract"] == "TA2402", "listed_date"].iloc[0])
+def test_filters_to_requested_symbols_and_drops_continuous(tmp_path):
+    _write_day(tmp_path, 2025, "20250105", [
+        _row("A2501.DCE", "20250105", 100, vol=1000),
+        _row("A.DCE", "20250105", 100, vol=5000),       # 连续合约,须滤除
+        _row("SR2501.ZCE", "20250105", 6000, vol=2000),  # 非目标品种
+    ])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    daily = result["daily_bar"]
+    assert list(daily.columns) == REQUIRED_DAILY_COLUMNS
+    assert set(daily["commodity"]) == {"A"}
+    assert set(daily["contract"]) == {"A2501"}
 
 
-def test_load_commodity_data_drops_contracts_without_dates_or_daily_data(cache_dir, config_path, monkeypatch):
-    import src.daily_screen.data_access as data_access
-
-    monkeypatch.setattr(
-        data_access,
-        "_load_symbol_meta",
-        lambda **kwargs: pd.DataFrame(
-            {
-                "commodity": ["TA", "TA"],
-                "contract": ["TA2303", "TA2401"],
-                "listed_date": [pd.NaT, pd.NaT],
-                "last_trade_date": [pd.NaT, pd.NaT],
-                "delivery_month": ["2303", "2401"],
-                "ts_code": [None, None],
-            }
-        ),
-    )
-    monkeypatch.setattr(data_access, "_discover_contracts_for_symbol", lambda symbol, meta_df, cache_dir: ["TA2303", "TA2401"])
-
-    def fake_daily_loader(*, contract_code, start_date, end_date, cache_dir, config, meta_row):
-        if contract_code == "TA2303":
-            return pd.DataFrame(columns=["trade_date", "commodity", "contract", "open", "high", "low", "close", "pre_close", "volume"])
-        return pd.DataFrame(
-            {
-                "trade_date": pd.to_datetime(["2024-01-05", "2024-01-08"]),
-                "commodity": ["TA", "TA"],
-                "contract": ["TA2401", "TA2401"],
-                "open": [1.0, 1.0],
-                "high": [1.0, 1.0],
-                "low": [1.0, 1.0],
-                "close": [1.0, 1.0],
-                "pre_close": [1.0, 1.0],
-                "volume": [1.0, 1.0],
-            }
-        )
-
-    monkeypatch.setattr(data_access, "_load_contract_daily_with_cache", fake_daily_loader)
-
-    result = load_commodity_data(
-        symbols=["TA"],
-        start_date="20240101",
-        end_date="20240131",
-        cache_dir=cache_dir,
-        config_path=config_path,
-    )
-
-    assert list(result["contract_meta"]["contract"]) == ["TA2401"]
-    assert list(result["daily_bar"]["contract"].unique()) == ["TA2401"]
+def test_date_window_includes_buffer_and_caps_end(tmp_path):
+    _write_day(tmp_path, 2024, "20241201", [_row("A2501.DCE", "20241201", 90)])   # 缓冲区(45天内)
+    _write_day(tmp_path, 2025, "20250105", [_row("A2501.DCE", "20250105", 100)])  # 窗口内
+    _write_day(tmp_path, 2025, "20250220", [_row("A2501.DCE", "20250220", 110)])  # 窗口外
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    dates = set(result["daily_bar"]["trade_date"].dt.strftime("%Y%m%d"))
+    assert "20241201" in dates   # 45 天缓冲包含
+    assert "20250105" in dates
+    assert "20250220" not in dates  # 超过 end_date 截断
 
 
-def test_list_contract_cache_files_uses_actual_csv_date_bounds(cache_dir):
-    df = pd.DataFrame(
-        {
-            "trade_date": ["2022-03-15", "2022-03-18", "2023-03-14"],
-            "commodity": ["TA", "TA", "TA"],
-            "contract": ["TA2303", "TA2303", "TA2303"],
-            "open": [1.0, 1.0, 1.0],
-            "high": [1.0, 1.0, 1.0],
-            "low": [1.0, 1.0, 1.0],
-            "close": [1.0, 1.0, 1.0],
-            "pre_close": [1.0, 1.0, 1.0],
-            "volume": [1.0, 1.0, 1.0],
-        }
-    )
-    path = cache_dir / "future_TA2303_20220116_20251217.csv"
-    df.to_csv(path, index=False)
+def test_contract_meta_listed_date_from_pre_window_history(tmp_path):
+    # A2501 真实首日在窗口之前(20241101),窗口从 20250101 起
+    _write_day(tmp_path, 2024, "20241101", [_row("A2501.DCE", "20241101", 80)])
+    _write_day(tmp_path, 2025, "20250105", [_row("A2501.DCE", "20250105", 100)])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    meta = result["contract_meta"]
+    assert list(meta.columns) == REQUIRED_META_COLUMNS
+    row = meta.loc[meta["contract"] == "A2501"].iloc[0]
+    assert row["listed_date"] == pd.Timestamp("2024-11-01")  # 真实首日,落在窗口外
 
-    cache_files = _list_contract_cache_files("TA2303", cache_dir)
 
-    assert len(cache_files) == 1
-    assert cache_files[0].start_date == "20220315"
-    assert cache_files[0].end_date == "20230314"
+def test_contract_meta_last_trade_date_from_future_year(tmp_path):
+    # A2501 在窗口(2025)出现,真实末日在未来年份(2026)
+    _write_day(tmp_path, 2025, "20250105", [_row("A2501.DCE", "20250105", 100)])
+    _write_day(tmp_path, 2026, "20260315", [_row("A2501.DCE", "20260315", 130)])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    meta = result["contract_meta"]
+    row = meta.loc[meta["contract"] == "A2501"].iloc[0]
+    assert row["last_trade_date"] == pd.Timestamp("2026-03-15")  # 取自未来年份,不是 end.year
+
+
+def test_pre_close_falls_back_to_pre_settle(tmp_path):
+    _write_day(tmp_path, 2025, "20250105", [
+        _row("A2501.DCE", "20250105", 104, pre_close=None, pre_settle=98),
+    ])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    assert result["daily_bar"]["pre_close"].iloc[0] == 98
+
+
+def test_pre_close_prev_close_no_cross_contract_pollution(tmp_path):
+    # A2501 20250105 close=100;B2501 20250105 与 20250106,pre_close/pre_settle 都缺
+    # 若全局 shift:B2501 20250106 会错拿 A2501 的 100
+    # groupby 后:B2501 20250106 pre_close 应=B2501 20250105 的 close=200
+    _write_day(tmp_path, 2025, "20250105", [
+        _row("A2501.DCE", "20250105", 100, pre_close=None, pre_settle=None),
+        _row("B2501.DCE", "20250105", 200, pre_close=None, pre_settle=None),
+    ])
+    _write_day(tmp_path, 2025, "20250106", [
+        _row("B2501.DCE", "20250106", 210, pre_close=None, pre_settle=None),
+    ])
+    result = load_commodity_data(["A", "B"], "20250101", "20250110", data_dir=tmp_path)
+    daily = result["daily_bar"]
+    b206 = daily.loc[(daily["contract"] == "B2501") & (daily["trade_date"] == pd.Timestamp("2025-01-06"))]
+    assert b206["pre_close"].iloc[0] == 200  # 同合约前一日 close,不是 A 的 100
+
+
+def test_merges_across_years(tmp_path):
+    # expanded_start = 20250101 - 45d = 20241117;20241230 落在缓冲区内,应保留
+    _write_day(tmp_path, 2024, "20241230", [_row("A2501.DCE", "20241230", 95)])
+    _write_day(tmp_path, 2025, "20250105", [_row("A2501.DCE", "20250105", 100)])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    dates = set(result["daily_bar"]["trade_date"].dt.strftime("%Y%m%d"))
+    assert dates == {"20241230", "20250105"}
+
+
+def test_misnamed_parquet_raises(tmp_path):
+    (tmp_path / "2025").mkdir(parents=True)
+    pd.DataFrame([{"code": "A2501.DCE", "date": "20250105"}]).to_parquet(tmp_path / "2025" / "bad_name.parquet")
+    with pytest.raises(ValueError, match="非 YYYYMMDD"):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+
+
+def test_missing_data_dir_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="data_dir 不存在"):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path / "nope")
+
+
+def test_data_dir_is_file_raises(tmp_path):
+    file_path = tmp_path / "not_a_dir.parquet"
+    file_path.write_bytes(b"x")
+    with pytest.raises(NotADirectoryError, match="不是目录"):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=file_path)
+
+
+def test_invalid_year_dir_raises(tmp_path):
+    (tmp_path / "2025").mkdir()
+    (tmp_path / "abc").mkdir()
+    with pytest.raises(ValueError, match="年份目录名非法"):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+
+
+def test_parses_lenient_date_formats(tmp_path):
+    # spec 要求 date → to_datetime(无 format);锁死宽松解析,防止退化成只认 YYYYMMDD
+    _write_day(tmp_path, 2025, "20250105", [_row("A2501.DCE", "2025-01-05", 100)])  # ISO 字符串
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    assert set(result["daily_bar"]["trade_date"].dt.strftime("%Y%m%d")) == {"20250105"}
+
+
+def test_corrupt_parquet_raises_with_context(tmp_path):
+    # 文件名合法但内容非 parquet → 异常必须带 file_path / pass / file_date
+    (tmp_path / "2025").mkdir(parents=True)
+    (tmp_path / "2025" / "20250105.parquet").write_bytes(b"not a parquet file")
+    with pytest.raises(RuntimeError, match=r"parquet 读取失败.*file_path=.*pass=[AB].*file_date=20250105"):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+
+
+def test_clips_rows_by_trade_date_not_just_filename(tmp_path):
+    # 文件名 20250105 在窗口内,但文件里塞了一行 date=20250220(窗口外)→ 必须按 trade_date 裁掉
+    _write_day(tmp_path, 2025, "20250105", [
+        _row("A2501.DCE", "20250105", 100),
+        _row("A2501.DCE", "20250220", 999),  # 与文件名不一致的脏行
+    ])
+    result = load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
+    dates = set(result["daily_bar"]["trade_date"].dt.strftime("%Y%m%d"))
+    assert dates == {"20250105"}  # 20250220 被裁掉
+
+
+def test_pass_b_failure_attaches_symbols(tmp_path):
+    # 文件只有 code/date 列:Pass A 读 [code,date] 成功,Pass B 读 OHLC 列失败
+    # → 异常须带全四字段:file_path / pass=B / file_date / symbols
+    (tmp_path / "2025").mkdir(parents=True)
+    pd.DataFrame([{"code": "A2501.DCE", "date": "20250105"}]).to_parquet(tmp_path / "2025" / "20250105.parquet")
+    with pytest.raises(
+        RuntimeError,
+        match=r"parquet 读取失败.*file_path=.*pass=B.*file_date=20250105.*symbols=",
+    ):
+        load_commodity_data(["A"], "20250101", "20250110", data_dir=tmp_path)
