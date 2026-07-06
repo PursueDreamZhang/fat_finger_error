@@ -30,7 +30,7 @@
 - **回测口径收敛**：fill 仅 `conservative_fill`，exit 仅 `bid_exit + timeout_exit`。
 - 不做品种配置表 / 金额收益：tick_size 推导，所有样本 `research_only`。
 - 不做月份 / 时段 / 合约桶统计、不做 `opportunity_score` 排序与推荐门槛。
-- **不处理夜盘**：所有品种按纯日盘建模，`delta_volume` 在 day-open 首条记 unknown。
+- **不处理夜盘**：loader 丢弃非日盘连续交易时段的行（夜盘 21:00–02:30、集合竞价外、收盘后），只保留 09:00–10:15 / 10:30–11:30 / 13:30–15:00。AU2606 的 11:08 乌龙指在日盘内，不受影响。`night_session_coverage` 记录该合约原始文件是否存在夜盘快照（用于排查 v1 是否丢了夜盘段）。日盘内按 `(timestamp, snapshot_seq)` 排序；`delta_volume` 在 09:00 首条记 unknown。
 - 不入库 notebook（开发期可作探索工具）。
 
 ## 3. 输入
@@ -57,7 +57,7 @@ run_tick_replay.py
 - **读 zip 或解压目录**：glob `<CONTRACT>_<DATE>.csv`，支持从 zip 流式读取单文件，避免全量解压入内存。
 - **parse_status 判定（F1 修正，大 spec §5.1 有 bug）**：**先看文件名**，含 `主力连续|当月连续|下月连续|当季连续|下季连续|隔季连续` → `continuous_alias`（直接弃，不入池）；否则用 `InstrumentID` 解析 commodity / contract_month，解析失败 → `unknown_suffix` / `unknown_format`。只保留 `parse_status == ok`。
   > 实测 `AP主力连续_*.csv` 与 `AP605_*.csv` 的 `InstrumentID` 都是 `AP605`、MD5 相同。只看 InstrumentID 会让每个主力合约数据双倍加载，merge_asof / snapshot_seq / 事件全部失真。
-- 每合约按 `(timestamp, snapshot_seq)` 排序，派生：
+- 每合约读取后：先在**全量行**上派生 `session_state`，记录 `night_session_coverage`（是否存在非日盘快照）；再**过滤到 `is_tradable_session==true`**（日盘连续交易段，丢弃夜盘/竞价/收盘后），按 `(timestamp, snapshot_seq)` 排序后派生：
   - `timestamp = TradingDay + UpdateTime + UpdateMillisec`、`snapshot_seq`（同合约文件内行序）。
   - `session_state` / `is_tradable_session`，按下表（v1 日盘 only，近似）：
 
