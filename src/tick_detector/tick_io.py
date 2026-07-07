@@ -124,6 +124,8 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["is_tradable_session"] = df["UpdateTime"].map(_is_tradable_session)
     df["night_session_coverage"] = bool((~df["is_tradable_session"]).any())
     df = df.loc[df["is_tradable_session"]].copy()
+    if df.empty:
+        return df
     df = df.sort_values(["timestamp", "snapshot_seq"], kind="stable").reset_index(drop=True)
     df["night_session_coverage"] = bool(raw_df["UpdateTime"].map(_is_tradable_session).eq(False).any())
 

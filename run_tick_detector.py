@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 
 import pandas as pd
 
@@ -33,9 +34,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run_detection(*, tick_day_path: str, commodity: str | None, contract: str | None, output_dir: str) -> dict[str, str]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    target_commodity = commodity.upper() if commodity else _commodity_from_contract(contract)
 
     day_frames: dict[str, pd.DataFrame] = {}
     for contract_file in iter_day_contract_files(tick_day_path):
+        if target_commodity and not contract_file.file_name.upper().startswith(target_commodity):
+            continue
         raw = load_contract_snapshots(contract_file)
         if raw.empty or raw["parse_status"].iloc[0] != "ok":
             continue
@@ -112,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
     )
     return 0
+
+
+def _commodity_from_contract(contract: str | None) -> str | None:
+    if not contract:
+        return None
+    match = re.match(r"^([A-Za-z]+)", contract)
+    return match.group(1).upper() if match else None
 
 
 if __name__ == "__main__":
