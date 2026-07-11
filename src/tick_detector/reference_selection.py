@@ -254,13 +254,14 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
 
         last_arr = np.array(last_noise, dtype=float)
         vwap_arr = np.array(vwap_noise, dtype=float)
-        depth_arr = np.maximum(last_arr, vwap_arr)
 
-        last_med = float(np.median(last_arr))
-        vwap_med = float(np.median(vwap_arr))
-        last_sigma = _mad_sigma(last_arr)
-        vwap_sigma = _mad_sigma(vwap_arr)
-        depth_sigma = _mad_sigma(depth_arr)
+        last_med = float(np.median(last_arr)) if len(last_arr) else 0.0
+        vwap_med = float(np.median(vwap_arr)) if len(vwap_arr) else 0.0
+        last_sigma = _mad_sigma(last_arr) if len(last_arr) else 0.0
+        vwap_sigma = _mad_sigma(vwap_arr) if len(vwap_arr) else 0.0
+        # execution_depth_robust_sigma: 取两通道各自深度噪声的并集
+        depth_all = np.concatenate([last_arr, vwap_arr]) if len(last_arr) and len(vwap_arr) else (last_arr if len(last_arr) else vwap_arr)
+        depth_sigma = _mad_sigma(depth_all) if len(depth_all) else 0.0
 
         out.at[i, "last_noise_median"] = last_med
         out.at[i, "vwap_noise_median"] = vwap_med
