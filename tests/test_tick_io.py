@@ -308,13 +308,13 @@ def test_open_guard_protects_first_59_seconds_after_session_open():
 
 
 def test_interval_vwap_uses_delta_turnover_over_delta_volume_divided_by_multiplier():
-    # AU multiplier=1000
+    # AU multiplier=1000; AveragePrice = Turnover/Volume（元/手单位）
     raw = _au_raw(
         [
-            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0, average_price=100.0),
+            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0, average_price=100000.0),
             _tick_row(
                 "au2606", "09:01:31", 0,
-                last_price=99.0, volume=170, turnover=16700000.0, average_price=98.235,
+                last_price=99.0, volume=170, turnover=16700000.0, average_price=98235.294,
             ),
         ]
     )
@@ -330,17 +330,18 @@ def test_interval_vwap_uses_delta_turnover_over_delta_volume_divided_by_multipli
 def test_average_price_unit_check_only_not_counter_evidence():
     raw = _au_raw(
         [
-            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0, average_price=100.0),
+            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0, average_price=100000.0),
             _tick_row(
                 "au2606", "09:01:31", 0,
-                volume=170, turnover=16700000.0, average_price=98.235,
+                volume=170, turnover=16700000.0, average_price=98235.294,
             ),
         ]
     )
     df = prepare_contract_snapshots(raw)
 
-    # avg_trade_price_enabled 只校验单位
+    # avg_trade_price_enabled 只校验单位（AveragePrice=Turnover/Volume）
     assert "avg_trade_price_enabled" in df.columns
+    assert bool(df["avg_trade_price_enabled"].iloc[1]) is True
 
 
 # ---------------------------------------------------------------------------

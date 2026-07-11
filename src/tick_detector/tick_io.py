@@ -335,14 +335,19 @@ def _invalidate_blocked_diffs(df: pd.DataFrame) -> None:
 
 
 def _average_price_matches_multiplier(df: pd.DataFrame, multiplier: int) -> pd.Series:
-    ratio = df["Turnover"] / df["Volume"] / multiplier
+    """校验 AveragePrice 单位。
+
+    设计文档 §4.4：Turnover/Volume ≈ AveragePrice（AveragePrice 本身就是元/手单位，
+    不再除以 multiplier）。只有 (Turnover/Volume)/multiplier 才是价格单位。
+    """
+    ratio = df["Turnover"] / df["Volume"]
     enabled = (
         df["AveragePrice"].notna()
         & (df["AveragePrice"] > 0)
         & df["Volume"].notna()
         & (df["Volume"] > 0)
         & ratio.notna()
-        & ((ratio - df["AveragePrice"]).abs() <= 0.05)
+        & ((ratio - df["AveragePrice"]).abs() <= 0.5)
     )
     return enabled.fillna(False)
 
