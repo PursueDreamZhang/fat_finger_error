@@ -1,217 +1,283 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
 
 import numpy as np
 import pandas as pd
 
-MIN_EVENT_DELTA_VOLUME = 10
-MIN_REFERENCE_CONTRACT_COUNT = 2
-MAX_SPREAD_TICKS = 20
-STRONG_SIGNAL_MAX_SPREAD_TICKS = 25
-MIN_LAST_VS_MID_DOWN_TICKS = 20
-MIN_PEER_EXCESS_DOWN_TICKS = 20
-STRONG_SIGNAL_MIN_DELTA_VOLUME = 50
-STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS = 50
-STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS = 10
-MIN_AVG_TRADE_GAP_TICKS = 20
-LIMIT_BUFFER_TICKS = 2
+from src.tick_detector.tick_io import MAX_DATA_GAP_SECONDS
+
+# 1 秒均价确认窗的采样完整性条件（比数据断点更严格）
+MAX_CONFIRMATION_GAP_SECONDS = 1
+
+# onset 窗口
+ONSET_WINDOW_SECONDS = 3
+ONSET_MIN_TICKS = 8
+ONSET_K_SIGMA = 5
+
+# 事件合并
 MERGE_WINDOW_SECONDS = 10
-RECOVERY_WINDOWS = (10, 30)
-OPEN_GUARD_SECONDS = 60
-OPEN_GUARD_TIMES = ("09:00:00", "09:30:00", "21:00:00")
 
 
-def detect_candidate_ticks(df: pd.DataFrame) -> pd.DataFrame:
+def detect_candidate_ticks(
+    df: pd.DataFrame,
+    *,
+    return_marked: bool = False,
+) -> pd.DataFrame:
+    """双成交通道检测：visible_execution_drop / interval_execution_drop + onset。
+
+    设计文档 §6（有向成交信号）、§7（突发性与候选触发）、§7.1（区间均价计数器确认）。
+    时间契约统一使用 market_time_key（毫秒）。
+    """
     if df.empty:
         return df.copy()
-    out = df.copy()
-    base_mask = (
-        (out["delta_volume"] > 0)
-        & (out["delta_volume"] >= MIN_EVENT_DELTA_VOLUME)
-        & (out["reference_contract_count"] >= MIN_REFERENCE_CONTRACT_COUNT)
-        & (out["LastPrice"] > (out["LowerLimitPrice"] + LIMIT_BUFFER_TICKS * _infer_tick_size_from_row(out)))
-        & (~out.apply(_is_open_guard_window, axis=1))
-    )
+    out = df.sort_values("market_time_key", kind="stable").reset_index(drop=True).copy()
+    n = len(out)
+    keys = out["market_time_key"].to_numpy()
+    tick_size = float(out["tick_size"].iloc[0]) if "tick_size" in out.columns else 0.02
+    multiplier = int(out["contract_multiplier"].iloc[0]) if "contract_multiplier" in out.columns else 1000
 
-    visible_regular_mask = (
-        (out["last_vs_mid_down_ticks"] >= MIN_LAST_VS_MID_DOWN_TICKS)
-        & (out["peer_excess_down_ticks"] >= MIN_PEER_EXCESS_DOWN_TICKS)
-        & (out["spread_ticks"] <= MAX_SPREAD_TICKS)
-    )
-    visible_strong_signal_mask = (
-        (out["delta_volume"] >= STRONG_SIGNAL_MIN_DELTA_VOLUME)
-        & (out["last_vs_mid_down_ticks"] >= STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS)
-        & (out["spread_ticks"] <= STRONG_SIGNAL_MAX_SPREAD_TICKS)
-        & (out["peer_excess_down_ticks"] >= STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS)
-    )
-    hidden_mask = (
-        out["snapshot_avg_trade_gap_ticks"].notna()
-        & (out["snapshot_avg_trade_gap_ticks"] >= MIN_AVG_TRADE_GAP_TICKS)
-    )
-    out = out.loc[base_mask & (visible_regular_mask | visible_strong_signal_mask | hidden_mask)].copy()
-    if out.empty:
+    # 预计算每行的有向偏离
+    last_down_ticks = np.full(n, np.nan)
+    vwap_down_ticks = np.full(n, np.nan)
+    for i in range(n):
+        fp = out.at[i, "fair_price"]
+        if not np.isfinite(fp) or fp <= 0:
+            continue
+        last = out.at[i, "LastPrice"]
+        if np.isfinite(last) and last > 0:
+            last_down_ticks[i] = (fp - last) / tick_size
+        vwap = out.at[i, "interval_vwap"]
+        if np.isfinite(vwap) and vwap > 0:
+            vwap_down_ticks[i] = (fp - vwap) / tick_size
+    out["last_down_ticks"] = last_down_ticks
+    out["vwap_down_ticks"] = vwap_down_ticks
+
+    candidate_mask = np.zeros(n, dtype=bool)
+    trigger_reasons: list[list[str]] = [[] for _ in range(n)]
+    combined_vwap_1s = np.full(n, np.nan)
+    combined_vwap_down_ticks = np.full(n, np.nan)
+    confirmation_end = np.full(n, np.nan)
+    data_quality = [list(out.at[i, "data_quality_flags"].split(",")) if str(out.at[i, "data_quality_flags"]) else [] for i in range(n)]
+
+    for i in range(n):
+        # 基础阻断条件（设计文档 §4.4）
+        if not _is_data_eligible(out, i):
+            continue
+        dv = out.at[i, "delta_volume"]
+        if not (np.isfinite(dv) and dv > 0):
+            continue
+        if not bool(out.at[i, "fair_price_reliable"]):
+            continue
+        if not bool(out.at[i, "noise_history_reliable"]):
+            continue
+        if str(out.at[i, "validation_status"]) != "validated":
+            continue
+        if bool(out.at[i, "is_open_protected"]):
+            continue
+
+        last_thr = float(out.at[i, "last_threshold_ticks"])
+        vwap_thr = float(out.at[i, "vwap_threshold_ticks"])
+
+        # visible_execution_drop：末笔低于 fair_price 超阈值（独立判断，不等待未来数据）
+        visible_hit = (
+            np.isfinite(last_down_ticks[i])
+            and last_down_ticks[i] >= last_thr
+        )
+
+        # interval_execution_drop：区间均价超阈值 + 完整 1s 合并仍异常
+        interval_hit = False
+        if np.isfinite(vwap_down_ticks[i]) and vwap_down_ticks[i] >= vwap_thr:
+            conf = _compute_1s_confirmation(out, i, tick_size, multiplier)
+            combined_vwap_1s[i] = conf["combined_vwap"]
+            confirmation_end[i] = conf["confirmation_end_key"]
+            if conf["block_reason"]:
+                data_quality[i].append(conf["block_reason"])
+            if conf["window_complete"]:
+                cv = (float(out.at[i, "fair_price"]) - conf["combined_vwap"]) / tick_size
+                combined_vwap_down_ticks[i] = cv
+                if cv >= vwap_thr:
+                    interval_hit = True
+                else:
+                    # 单帧异常但合并后正常
+                    data_quality[i].append("counter_lag_suspect")
+            # 窗口不完整时区间分支不触发（counter_sync_unconfirmed 由 block_reason 记录）
+
+        if not (visible_hit or interval_hit):
+            continue
+
+        # onset：过去 3 秒深度
+        pre_depth, onset_ok, onset_val = _check_onset(
+            out, i, last_down_ticks, vwap_down_ticks, tick_size
+        )
+        if not onset_ok:
+            data_quality[i].append("onset_data_gap")
+            continue
+
+        onset_ticks = max(0.0, max(last_down_ticks[i] if visible_hit else 0.0,
+                                   _cand_depth(i, last_down_ticks, vwap_down_ticks, interval_hit))
+                           - max(0.0, pre_depth))
+        sigma = float(out.at[i, "execution_depth_robust_sigma"]) if np.isfinite(out.at[i, "execution_depth_robust_sigma"]) else 1.0
+        onset_threshold = max(ONSET_MIN_TICKS, ONSET_K_SIGMA * sigma)
+        if onset_ticks < onset_threshold:
+            continue
+
+        candidate_mask[i] = True
+        out.at[i, "candidate_execution_depth"] = max(
+            last_down_ticks[i] if visible_hit else -math.inf,
+            (combined_vwap_down_ticks[i] if np.isfinite(combined_vwap_down_ticks[i]) else vwap_down_ticks[i]) if interval_hit else -math.inf,
+        )
+        out.at[i, "onset_ticks"] = onset_ticks
+        out.at[i, "combined_vwap_1s"] = combined_vwap_1s[i]
+        out.at[i, "combined_vwap_down_ticks"] = combined_vwap_down_ticks[i]
+        out.at[i, "interval_confirmation_end_time"] = confirmation_end[i]
+        if visible_hit:
+            trigger_reasons[i].append("visible_execution_drop")
+        if interval_hit:
+            trigger_reasons[i].append("interval_execution_drop")
+
+    # 写回 data_quality_flags
+    out["data_quality_flags"] = [",".join(set(f for f in flags if f)) for flags in data_quality]
+    out["trigger_reasons"] = [",".join(r) for r in trigger_reasons]
+    out.loc[~candidate_mask, "candidate_execution_depth"] = np.nan
+
+    if return_marked:
         return out
-    out["trigger_reasons"] = out.apply(_build_trigger_reasons, axis=1)
-    return out
+    return out.loc[candidate_mask].copy()
 
 
-def _is_open_guard_window(row: pd.Series) -> bool:
-    timestamp = row.get("timestamp")
-    if pd.isna(timestamp):
+# ---------------------------------------------------------------------------
+# 1 秒合并 helper（Task 3 检测 + Task 4 恢复共用）
+# ---------------------------------------------------------------------------
+
+
+def _compute_1s_confirmation(
+    df: pd.DataFrame,
+    start_idx: int,
+    tick_size: float,
+    multiplier: int,
+) -> dict[str, object]:
+    """从 start_idx 起，取同 session 内完整 1s 窗口的合并 vwap。
+
+    完整性要求（设计文档 §7.1）：
+      - 窗口覆盖到 t+1s
+      - 中间相邻时间键 gap 不超过 MAX_CONFIRMATION_GAP_SECONDS
+      - 所有累计增量有效且未跨 session
+      - 仅累计有效正增量
+    """
+    keys = df["market_time_key"].to_numpy()
+    start_mk = int(keys[start_idx])
+    end_mk = start_mk + 1000  # t+1s
+    n = len(df)
+
+    total_dv = 0.0
+    total_dt = 0.0
+    window_complete = False
+    confirmation_end_key = np.nan
+    block_reason = ""
+    last_mk = start_mk
+
+    for j in range(start_idx, n):
+        mk = int(keys[j])
+        if mk > end_mk:
+            break
+        if j > start_idx:
+            gap_ms = mk - last_mk
+            if gap_ms > MAX_CONFIRMATION_GAP_SECONDS * 1000:
+                block_reason = "counter_sync_unconfirmed"
+                return {"combined_vwap": np.nan, "window_complete": False,
+                        "confirmation_end_key": np.nan, "block_reason": block_reason}
+        # 跨 session 检查
+        if not bool(df.at[j, "is_tradable_session"]):
+            block_reason = "counter_sync_unconfirmed"
+            return {"combined_vwap": np.nan, "window_complete": False,
+                    "confirmation_end_key": np.nan, "block_reason": block_reason}
+        dv = df.at[j, "delta_volume"]
+        dt = df.at[j, "delta_turnover"]
+        if np.isfinite(dv) and dv > 0 and np.isfinite(dt) and dt > 0:
+            total_dv += dv
+            total_dt += dt
+        elif np.isfinite(dv) and dv < 0:
+            block_reason = "counter_sync_unconfirmed"
+            return {"combined_vwap": np.nan, "window_complete": False,
+                    "confirmation_end_key": np.nan, "block_reason": block_reason}
+        last_mk = mk
+        if mk >= end_mk:
+            window_complete = True
+            confirmation_end_key = mk
+            break
+
+    if not window_complete or total_dv <= 0:
+        return {"combined_vwap": np.nan, "window_complete": False,
+                "confirmation_end_key": np.nan,
+                "block_reason": block_reason or "confirmation_incomplete"}
+    combined_vwap = total_dt / total_dv / multiplier
+    return {"combined_vwap": combined_vwap, "window_complete": True,
+            "confirmation_end_key": confirmation_end_key, "block_reason": ""}
+
+
+# ---------------------------------------------------------------------------
+# onset
+# ---------------------------------------------------------------------------
+
+
+def _check_onset(
+    df: pd.DataFrame,
+    i: int,
+    last_down_ticks: np.ndarray,
+    vwap_down_ticks: np.ndarray,
+    tick_size: float,
+) -> tuple[float, bool, float]:
+    """过去 3 秒深度的中位数；数据中断时 pre_depth 未知 -> onset_ok=False。"""
+    keys = df["market_time_key"].to_numpy()
+    mk = int(keys[i])
+    ws = mk - ONSET_WINDOW_SECONDS * 1000
+    # 先检查候选行与前一行的 gap（即使前一行在 onset 窗口外）
+    if i > 0:
+        prev_gap = mk - int(keys[i - 1])
+        if prev_gap > MAX_DATA_GAP_SECONDS * 1000:
+            return (float("nan"), False, 0.0)
+    depths: list[float] = []
+    for j in range(i - 1, -1, -1):
+        jmk = int(keys[j])
+        if jmk < ws:
+            break
+        if j + 1 < len(keys):
+            gap_to_prev = int(keys[j + 1]) - jmk
+            if gap_to_prev > MAX_DATA_GAP_SECONDS * 1000:
+                return (float("nan"), False, 0.0)
+        dv = df.at[j, "delta_volume"]
+        if not (np.isfinite(dv) and dv > 0):
+            continue
+        d = max(last_down_ticks[j] if np.isfinite(last_down_ticks[j]) else 0.0,
+                vwap_down_ticks[j] if np.isfinite(vwap_down_ticks[j]) else 0.0)
+        depths.append(d)
+    pre_depth = float(np.median(depths)) if depths else 0.0
+    return (pre_depth, True, pre_depth)
+
+
+def _is_data_eligible(df: pd.DataFrame, i: int) -> bool:
+    """§4.4 基础过滤：可交易时段、有效价格。"""
+    if not bool(df.at[i, "is_tradable_session"]):
         return False
-    current = pd.Timestamp(timestamp)
-    for open_time in OPEN_GUARD_TIMES:
-        anchor = pd.Timestamp(f"{current.date()} {open_time}")
-        delta_seconds = (current - anchor).total_seconds()
-        if 0 <= delta_seconds < OPEN_GUARD_SECONDS:
-            return True
-    return False
+    last = df.at[i, "LastPrice"]
+    lower = df.at[i, "LowerLimitPrice"]
+    upper = df.at[i, "UpperLimitPrice"]
+    if np.isfinite(lower) and lower > 0 and last <= lower:
+        return False
+    if np.isfinite(upper) and upper > 0 and last >= upper:
+        return False
+    return True
 
 
-def merge_candidates(candidates: pd.DataFrame, merge_window_seconds: int = MERGE_WINDOW_SECONDS) -> pd.DataFrame:
-    if candidates.empty:
-        return candidates.copy()
-    candidates = candidates.sort_values(["contract", "timestamp", "snapshot_seq"], kind="stable").reset_index(drop=True)
-    events: list[dict[str, object]] = []
-    for _, contract_rows in candidates.groupby("contract", sort=False):
-        group_start = 0
-        rows = contract_rows.reset_index(drop=True)
-        for idx in range(1, len(rows) + 1):
-            should_flush = idx == len(rows) or (rows.loc[idx, "timestamp"] - rows.loc[idx - 1, "timestamp"]).total_seconds() > merge_window_seconds
-            if not should_flush:
-                continue
-            window = rows.iloc[group_start:idx].copy()
-            anchor = window.sort_values(["event_depth_ticks", "timestamp", "snapshot_seq"], ascending=[False, True, True], kind="stable").iloc[0]
-            trigger_reasons = ""
-            if "trigger_reasons" in window.columns:
-                trigger_reasons = ",".join(sorted(set(window["trigger_reasons"].dropna())))
-            events.append(
-                {
-                    "trade_date": anchor["trade_date"],
-                    "commodity": anchor["commodity"],
-                    "contract": anchor["contract"],
-                    "event_time": anchor["timestamp"],
-                    "event_start_time": window["timestamp"].min(),
-                    "event_end_time": window["timestamp"].max(),
-                    "event_low_price": float(window["LastPrice"].min()),
-                    "event_volume": float(window.loc[window["delta_volume"] > 0, "delta_volume"].sum()),
-                    "event_depth_ticks": float(window["event_depth_ticks"].max()),
-                    "recovery_denominator_ticks": max(
-                        1.0,
-                        (float(anchor["mid_price"]) - float(window["LastPrice"].min())) / _infer_tick_size_from_row(window),
-                    ),
-                    "reference_contract_count": int(anchor["reference_contract_count"]),
-                    "trigger_reasons": trigger_reasons,
-                }
-            )
-            group_start = idx
-    return pd.DataFrame(events)
-
-
-def attach_recovery_metrics(events_df: pd.DataFrame, contract_df: pd.DataFrame, tick_size: float) -> pd.DataFrame:
-    if events_df.empty:
-        return events_df.copy()
-    out = events_df.copy()
-    for seconds in RECOVERY_WINDOWS:
-        out[f"quote_recovery_{seconds}s_ticks"] = np.nan
-        out[f"trade_recovery_{seconds}s_ticks"] = np.nan
-    out["recovery_label"] = pd.Series([None] * len(out), dtype="object")
-
-    contract_rows = contract_df.sort_values(["contract", "timestamp"], kind="stable").reset_index(drop=True)
-    for index, event in out.iterrows():
-        rows = contract_rows.loc[contract_rows["contract"] == event["contract"]].reset_index(drop=True)
-        anchor_idx = rows.index[rows["timestamp"] == event["event_time"]]
-        if len(anchor_idx) == 0:
-            out.at[index, "recovery_label"] = "no_recovery"
-            continue
-        anchor_idx = int(anchor_idx[0])
-        truncated = False
-        usable = [rows.iloc[anchor_idx]]
-        window_end = pd.Timestamp(event["event_time"]) + pd.Timedelta(seconds=max(RECOVERY_WINDOWS))
-        broke_on_gap = False
-        for row_idx in range(anchor_idx + 1, len(rows)):
-            prev_ts = pd.Timestamp(rows.iloc[row_idx - 1]["timestamp"])
-            cur_ts = pd.Timestamp(rows.iloc[row_idx]["timestamp"])
-            if (cur_ts - prev_ts).total_seconds() > 60:
-                broke_on_gap = True
-                break
-            if cur_ts > window_end:
-                break
-            usable.append(rows.iloc[row_idx])
-        usable_df = pd.DataFrame(usable)
-        if broke_on_gap and pd.Timestamp(usable_df["timestamp"].max()) < window_end:
-            truncated = True
-        event_low = float(event["event_low_price"])
-        for seconds in RECOVERY_WINDOWS:
-            cutoff = pd.Timestamp(event["event_time"]) + pd.Timedelta(seconds=seconds)
-            window = usable_df.loc[usable_df["timestamp"] <= cutoff]
-            if window.empty:
-                continue
-            quote_ticks = (float(window["BidPrice1"].max()) - event_low) / tick_size
-            trade_rows = window.loc[window["delta_volume"] > 0]
-            trade_ticks = np.nan
-            if not trade_rows.empty:
-                trade_ticks = (float(trade_rows["LastPrice"].max()) - event_low) / tick_size
-            out.at[index, f"quote_recovery_{seconds}s_ticks"] = quote_ticks
-            out.at[index, f"trade_recovery_{seconds}s_ticks"] = trade_ticks
-
-        if truncated:
-            out.at[index, "recovery_label"] = "truncated"
-            continue
-
-        denominator = float(event["recovery_denominator_ticks"]) or 1.0
-        quote_10 = float(out.at[index, "quote_recovery_10s_ticks"]) if pd.notna(out.at[index, "quote_recovery_10s_ticks"]) else 0.0
-        trade_10 = float(out.at[index, "trade_recovery_10s_ticks"]) if pd.notna(out.at[index, "trade_recovery_10s_ticks"]) else 0.0
-        quote_30 = float(out.at[index, "quote_recovery_30s_ticks"]) if pd.notna(out.at[index, "quote_recovery_30s_ticks"]) else 0.0
-        trade_30 = float(out.at[index, "trade_recovery_30s_ticks"]) if pd.notna(out.at[index, "trade_recovery_30s_ticks"]) else 0.0
-        if trade_10 / denominator >= 0.5:
-            out.at[index, "recovery_label"] = "fast_trade_recovery"
-        elif quote_10 / denominator >= 0.5:
-            out.at[index, "recovery_label"] = "fast_quote_recovery"
-        elif max(quote_30, trade_30) / denominator >= 0.5:
-            out.at[index, "recovery_label"] = "slow_recovery"
-        else:
-            out.at[index, "recovery_label"] = "no_recovery"
-    return out
-
-
-def _build_trigger_reasons(row: pd.Series) -> str:
-    reasons: list[str] = []
-    if (
-        pd.notna(row.get("last_vs_mid_down_ticks"))
-        and pd.notna(row.get("peer_excess_down_ticks"))
-        and float(row["last_vs_mid_down_ticks"]) >= MIN_LAST_VS_MID_DOWN_TICKS
-        and float(row["peer_excess_down_ticks"]) >= MIN_PEER_EXCESS_DOWN_TICKS
-        and pd.notna(row.get("spread_ticks"))
-        and float(row["spread_ticks"]) <= MAX_SPREAD_TICKS
-    ):
-        reasons.append("visible_last_drop")
-    if (
-        pd.notna(row.get("delta_volume"))
-        and pd.notna(row.get("last_vs_mid_down_ticks"))
-        and pd.notna(row.get("peer_excess_down_ticks"))
-        and pd.notna(row.get("spread_ticks"))
-        and float(row["delta_volume"]) >= STRONG_SIGNAL_MIN_DELTA_VOLUME
-        and float(row["last_vs_mid_down_ticks"]) >= STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS
-        and float(row["spread_ticks"]) <= STRONG_SIGNAL_MAX_SPREAD_TICKS
-        and float(row["peer_excess_down_ticks"]) >= STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS
-    ):
-        reasons.append("strong_visible_last_drop")
-    if pd.notna(row.get("snapshot_avg_trade_gap_ticks")) and float(row["snapshot_avg_trade_gap_ticks"]) >= MIN_AVG_TRADE_GAP_TICKS:
-        reasons.append("hidden_avg_trade_drop")
-    return ",".join(reasons)
-
-
-def _infer_tick_size_from_row(df_or_row: pd.DataFrame | pd.Series) -> float:
-    spread_ticks = df_or_row["spread_ticks"]
-    spread = df_or_row["spread"]
-    if isinstance(df_or_row, pd.DataFrame):
-        valid = df_or_row.loc[pd.notna(spread_ticks) & (spread_ticks > 0) & pd.notna(spread) & (spread > 0), ["spread", "spread_ticks"]]
-        if valid.empty:
-            return 1.0
-        sample = valid.iloc[0]
-        return float(sample["spread"]) / float(sample["spread_ticks"])
-    if pd.notna(spread_ticks) and float(spread_ticks) > 0 and pd.notna(spread) and float(spread) > 0:
-        return float(spread) / float(spread_ticks)
-    return 1.0
+def _cand_depth(
+    i: int,
+    last_down_ticks: np.ndarray,
+    vwap_down_ticks: np.ndarray,
+    interval_hit: bool,
+) -> float:
+    if interval_hit and np.isfinite(vwap_down_ticks[i]):
+        return float(vwap_down_ticks[i])
+    if np.isfinite(last_down_ticks[i]):
+        return float(last_down_ticks[i])
+    return 0.0
