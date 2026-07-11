@@ -8,7 +8,9 @@ import pytest
 
 from src.tick_detector.event_detection import (
     MAX_CONFIRMATION_GAP_SECONDS,
+    attach_recovery_metrics,
     detect_candidate_ticks,
+    merge_candidates,
 )
 from src.tick_detector.tick_io import MAX_DATA_GAP_SECONDS
 
@@ -307,3 +309,275 @@ def test_candidate_writes_depth_and_down_tick_fields():
     # 两个原因都命中
     assert "visible_execution_drop" in str(row["trigger_reasons"])
     assert "interval_execution_drop" in str(row["trigger_reasons"])
+
+
+# ===========================================================================
+# Task 4: 事件合并与冻结 basis 同通道回归
+# ===========================================================================
+
+
+def _enriched_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
+    """构造带候选标记的 enriched target frame（模拟 detect_candidate_ticks 输出上下文）。"""
+    return _df(rows)
+
+
+def _candidate(
+    mk: int,
+    *,
+    depth: float = 50.0,
+    delta_volume: float = 10.0,
+    delta_turnover: float = 10000.0,
+    last_price: float = 99.0,
+    trigger_reasons: str = "visible_execution_drop",
+    last_threshold_ticks: float = 20.0,
+    vwap_threshold_ticks: float = 20.0,
+    fair_price: float = 100.0,
+    interval_vwap: float = 100.0,
+) -> dict[str, object]:
+    """带候选字段的行，用于 merge_candidates 测试。"""
+    base = _row(mk, last_price=last_price, interval_vwap=interval_vwap,
+                delta_volume=delta_volume, delta_turnover=delta_turnover,
+                fair_price=fair_price,
+                last_threshold_ticks=last_threshold_ticks,
+                vwap_threshold_ticks=vwap_threshold_ticks)
+    base["candidate_execution_depth"] = depth
+    base["onset_ticks"] = 50.0
+    base["trigger_reasons"] = trigger_reasons
+    base["last_down_ticks"] = (fair_price - last_price) / 0.02
+    base["vwap_down_ticks"] = (fair_price - interval_vwap) / 0.02
+    base["combined_vwap_1s"] = np.nan
+    base["combined_vwap_down_ticks"] = np.nan
+    base["interval_confirmation_end_time"] = np.nan
+    return base
+
+
+def test_merge_candidates_merges_within_10s_and_picks_max_depth_anchor():
+    # 三个候选在 10s 内，depth 不同
+    enriched = _enriched_frame([
+        _candidate(10000, depth=50.0, delta_volume=10),
+        _candidate(12000, depth=80.0, delta_volume=10),
+        _candidate(15000, depth=60.0, delta_volume=10),
+    ])
+    candidates = enriched.copy()
+    events = merge_candidates(candidates, enriched)
+    assert len(events) == 1
+    event = events.iloc[0]
+    # 锚点取 depth 最大者
+    assert event["event_depth_ticks"] == 80.0
+    assert event["event_anchor_key"] == 12000
+    # 事件成交量 = 开始至结束所有正增量之和
+    assert event["event_volume"] == 30.0
+
+
+def test_merge_candidates_does_not_merge_across_data_gap():
+    # gap > MAX_DATA_GAP_SECONDS=3s 时不可合并
+    enriched = _enriched_frame([
+        _candidate(10000, depth=50.0, delta_volume=10),
+        _candidate(20000, depth=80.0, delta_volume=10),  # gap=10s > 3s
+    ])
+    candidates = enriched.copy()
+    events = merge_candidates(candidates, enriched)
+    # 10s 合并窗内但数据 gap>3s -> 两个独立事件
+    assert len(events) == 2
+
+
+def test_merge_candidates_includes_intermediate_non_candidate_rows_in_volume():
+    """两个候选间插入未命中但 delta_volume>0 的快照，事件成交量仍包含该行"""
+    enriched = _enriched_frame([
+        _candidate(10000, depth=50.0, delta_volume=10),
+        _row(11000, last_price=100.0, delta_volume=15),   # 非候选但有成交
+        _candidate(12000, depth=80.0, delta_volume=10),
+    ])
+    candidates = enriched[enriched["market_time_key"].isin([10000, 12000])].copy()
+    events = merge_candidates(candidates, enriched)
+    assert len(events) == 1
+    # event_volume = 10 + 15 + 10 = 35
+    assert events["event_volume"].iloc[0] == 35.0
+
+
+def test_merge_candidates_copies_anchor_fields_and_dedups_reasons():
+    enriched = _enriched_frame([
+        _candidate(10000, depth=50.0, trigger_reasons="visible_execution_drop"),
+        _candidate(12000, depth=80.0, trigger_reasons="visible_execution_drop,interval_execution_drop"),
+    ])
+    candidates = enriched.copy()
+    events = merge_candidates(candidates, enriched)
+    event = events.iloc[0]
+    # 原子原因去重，固定顺序 visible,interval
+    assert event["trigger_reasons"] == "visible_execution_drop,interval_execution_drop"
+    # 锚点 fair_price 被复制
+    assert event["fair_price"] == 100.0
+    # 内部 peer 字段被复制
+    assert isinstance(event["__peer_bases"], dict)
+
+
+# ---------------------------------------------------------------------------
+# 恢复：冻结 basis 的同通道回归
+# ---------------------------------------------------------------------------
+
+
+def _peer_frame(code: str, rows: list[dict[str, object]]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    df["contract"] = code
+    df["commodity"] = "AU"
+    df["parse_status"] = "ok"
+    df["trade_date"] = "20260520"
+    df["validation_status"] = "validated"
+    df["tick_size"] = 0.02
+    df["contract_multiplier"] = 1000
+    df["parameter_profile"] = "AU_V1"
+    df["session_state"] = "continuous_trading"
+    df["is_tradable_session"] = True
+    df["avg_trade_price_enabled"] = True
+    df["UpperLimitPrice"] = 200.0
+    df["LowerLimitPrice"] = 50.0
+    return df
+
+
+def _peer_row(mk: int, mid_price: float = 100.0) -> dict[str, object]:
+    return {
+        "market_time_key": mk,
+        "display_trade_date": "20260520",
+        "display_time": f"mk{mk}",
+        "LastPrice": mid_price,
+        "mid_price": mid_price,
+        "BidPrice1": mid_price - 0.01,
+        "AskPrice1": mid_price + 0.01,
+        "Volume": 100.0,
+        "Turnover": 100000.0,
+        "delta_volume": 10.0,
+        "delta_turnover": 10000.0,
+        "interval_vwap": mid_price,
+        "is_tradable_session": True,
+    }
+
+
+def test_recovery_marks_trade_recovered_3s_when_channels_return():
+    """锚点两通道均触发，3s 内成交回到阈值内 -> trade_recovered_3s。
+
+    区间均价通道恢复需要完整 1s 确认窗，故恢复点必须有 t+1s 数据覆盖。
+    """
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        _row(10500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),  # 可见恢复
+        _row(11000, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),  # 1s确认覆盖到11500
+        _row(11500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    # peer frames：锚点后 peer 价格回到 100
+    peer_keys = [10000, 10500, 11000, 11500]
+    peer_a = _peer_frame("AU2608", [_peer_row(mk, 100.0) for mk in peer_keys])
+    peer_b = _peer_frame("AU2610", [_peer_row(mk, 100.0) for mk in peer_keys])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    row = recovered.iloc[0]
+    assert row["recovery_label"] == "trade_recovered_3s"
+    assert pd.notna(row["visible_recovered_seconds"])
+    assert pd.notna(row["interval_recovered_seconds"])
+
+
+def test_recovery_marks_truncated_on_data_gap():
+    """锚点后 10s 恢复窗内出现数据断点（gap>3s）-> truncated"""
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        _row(11000, last_price=99.0, interval_vwap=99.0, delta_volume=10, delta_turnover=990000),
+        # gap=5s > 3s 数据断点，落在 10s 恢复窗 [10000,20000] 内
+        _row(16000, last_price=99.0, interval_vwap=99.0, delta_volume=10, delta_turnover=990000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    peer_a = _peer_frame("AU2608", [_peer_row(10000, 100.0)])
+    peer_b = _peer_frame("AU2610", [_peer_row(10000, 100.0)])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    assert recovered["recovery_label"].iloc[0] == "truncated"
+
+
+def test_recovery_persistent_when_not_recovered_in_10s():
+    """10s 内连续数据但未恢复 -> persistent_10s"""
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        # 持续 99.0 不恢复，连续数据覆盖 10s 窗
+    ] + [_row(mk, last_price=99.0, interval_vwap=99.0, delta_volume=10, delta_turnover=990000,
+              bid_price=99.0)
+         for mk in range(11000, 21000, 1000)])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    peer_keys = list(range(10000, 21000, 1000))
+    peer_a = _peer_frame("AU2608", [_peer_row(mk, 100.0) for mk in peer_keys])
+    peer_b = _peer_frame("AU2610", [_peer_row(mk, 100.0) for mk in peer_keys])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    assert recovered["recovery_label"].iloc[0] == "persistent_10s"
+
+
+def test_recovery_interval_seconds_uses_confirmation_window_end():
+    """区间均价恢复秒数取完整 1s 确认窗结束，而非窗口起点。
+
+    恢复点 mk=10500，但 1s 确认窗覆盖到 mk=11500 才完整，
+    故 interval_recovered_seconds = (11500-10000)/1000 = 1.5s，而非 0.5s。
+    """
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        # mk=10500 成交正常，但 1s 合并窗要到 mk=11500 才完整
+        _row(10500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+        _row(11000, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+        _row(11500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    peer_keys = [10000, 10500, 11000, 11500]
+    peer_a = _peer_frame("AU2608", [_peer_row(mk, 100.0) for mk in peer_keys])
+    peer_b = _peer_frame("AU2610", [_peer_row(mk, 100.0) for mk in peer_keys])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    row = recovered.iloc[0]
+    # 区间恢复确认秒数 = 确认窗结束(mk=11500) - 锚点(10000) = 1.5s
+    assert row["interval_recovered_seconds"] == pytest.approx(1.5, abs=0.6)
+
+
+def test_recovery_does_not_re_estimate_threshold_from_future():
+    """恢复严格使用锚点的两类阈值，不从未来帧重新估计"""
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        _row(10500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+        _row(11000, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+        _row(11500, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    # 锚点阈值 last_threshold_ticks=20, vwap_threshold_ticks=20
+    anchor_thr = float(candidates["last_threshold_ticks"].iloc[0])
+    peer_keys = [10000, 10500, 11000, 11500]
+    peer_a = _peer_frame("AU2608", [_peer_row(mk, 100.0) for mk in peer_keys])
+    peer_b = _peer_frame("AU2610", [_peer_row(mk, 100.0) for mk in peer_keys])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    # 恢复判断使用锚点阈值 anchor_thr=20，不应被未来帧的阈值覆盖
+    assert recovered["last_threshold_ticks"].iloc[0] == pytest.approx(anchor_thr)
