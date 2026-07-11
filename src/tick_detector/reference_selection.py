@@ -5,27 +5,26 @@ import math
 import numpy as np
 import pandas as pd
 
+# AU_V1 起始参数（设计文档 §6.1）
+MIN_LAST_TICKS = 20
+MIN_VWAP_TICKS = 20
+MIN_DEPTH_BPS = 5
+NOISE_K = 8
+FAIR_UNCERTAINTY_LIMIT_TICKS = 10
 
-def infer_tick_size(df: pd.DataFrame) -> float | None:
-    prices = []
-    for column in ("LastPrice", "BidPrice1", "AskPrice1"):
-        if column in df.columns:
-            prices.extend(df.loc[df[column] > 0, column].astype(float).tolist())
-    if not prices:
-        return None
-    unique_prices = np.array(sorted(set(round(price, 6) for price in prices)))
-    if len(unique_prices) < 2:
-        return None
-    diffs = np.diff(unique_prices)
-    diffs = diffs[diffs > 0]
-    if len(diffs) == 0:
-        return None
-    rounded = pd.Series(np.round(diffs, 6))
-    mode = rounded.mode()
-    return float(mode.iloc[0]) if not mode.empty else float(rounded.iloc[0])
+BASELINE_WINDOW_SECONDS = 300
+BASELINE_EXCLUDE_RECENT_SECONDS = 10
+MAX_REFERENCE_AGE_SECONDS = 3
+MIN_VALID_PEERS = 2
+BASELINE_MIN_PAIRS_PER_PEER = 20
+BASELINE_MIN_SPAN_PER_PEER_SECONDS = 60
+NOISE_MIN_SAMPLE_COUNT = 100
+NOISE_MIN_SPAN_SECONDS = 120
+LIMIT_BUFFER_TICKS = 2
 
 
 def select_reference_contracts(day_frames: dict[str, pd.DataFrame], target_contract: str, limit: int = 5) -> list[str]:
+    """离线阶段按当日总成交量取同品种前 5 个真实参考合约。"""
     target_df = day_frames[target_contract]
     target_commodity = str(target_df["commodity"].iloc[0])
     candidates: list[tuple[str, float]] = []
@@ -40,142 +39,244 @@ def select_reference_contracts(day_frames: dict[str, pd.DataFrame], target_contr
     return [contract for contract, _ in candidates[:limit]]
 
 
-def attach_reference_metrics(
+def attach_fair_price_metrics(
     target_df: pd.DataFrame,
-    reference_dfs: list[pd.DataFrame],
+    reference_frames: dict[str, pd.DataFrame],
     tick_size: float,
-    lookback_seconds: int = 3,
-    max_reference_age_seconds: int = 3,
 ) -> pd.DataFrame:
-    out = target_df.sort_values(["timestamp", "snapshot_seq"], kind="stable").reset_index(drop=True).copy()
-    out["reference_contract_count"] = 0
-    out["peer_median_move_ticks"] = np.nan
-    out["peer_move_limit_ticks"] = np.nan
-    out["expected_price_simple"] = np.nan
-    out["expected_price_full"] = np.nan
-    out["down_deviation_ticks"] = np.nan
-    out["down_deviation_bps"] = np.nan
-    out["previous_last_price_at_lookback"] = np.nan
-    out["target_move_ticks"] = np.nan
-    out["last_vs_mid_down_ticks"] = np.nan
-    out["peer_excess_down_ticks"] = np.nan
-    out["snapshot_avg_trade_gap_ticks"] = np.nan
-    out["event_depth_ticks"] = np.nan
-    out["event_depth_bps"] = np.nan
-    out["full_blocked_reason"] = pd.Series([None] * len(out), dtype="object")
-    if "spread_ticks" not in out.columns and "spread" in out.columns:
-        out["spread_ticks"] = out["spread"] / tick_size
+    """为 enriched target frame 写入 fair_price、noise history、阈值与参考质量。
 
-    target_index = _build_asof_index(out)
-    sorted_refs = [
-        _build_asof_index(frame.sort_values(["timestamp", "snapshot_seq"], kind="stable").reset_index(drop=True))
-        for frame in reference_dfs
-    ]
+    设计文档 §5.1（参考合约）、§5.2（基线与 fair_price）、§6.1（noise 阈值）的离线实现。
+    时间契约统一使用 market_time_key（毫秒），不使用自然日 timestamp。
 
-    for index, row in out.iterrows():
-        query_ts = pd.Timestamp(row["timestamp"])
-        lookback_ts = query_ts - pd.Timedelta(seconds=lookback_seconds)
-        baseline = _take_asof_value(target_index, lookback_ts)
-        valid_peer_moves: list[float] = []
-        valid_peer_log_returns: list[float] = []
+    两遍算法：
+      Pass 1 — 对每个目标行 t 计算 basis_i(t)、fair_price(t)、fair_uncertainty_ticks。
+      Pass 2 — noise history 复用 Pass 1 已算好的 fair_price(s)，不再重复重估。
+    """
+    out = target_df.sort_values("market_time_key", kind="stable").reset_index(drop=True).copy()
 
-        for peer in sorted_refs:
-            current = _take_asof_value(peer, query_ts)
-            lookback = _take_asof_value(peer, lookback_ts)
-            if current is None or lookback is None:
+    n = len(out)
+    keys = out["market_time_key"].to_numpy()
+
+    # 初始化输出列
+    out["fair_price"] = np.nan
+    out["fair_uncertainty_ticks"] = np.nan
+    out["fair_price_reliable"] = False
+    out["valid_peer_count"] = 0
+    out["peer_contracts"] = ""
+    out["__valid_peer_contracts"] = [list() for _ in range(n)]
+    out["__peer_bases"] = [dict() for _ in range(n)]
+    out["last_threshold_ticks"] = np.nan
+    out["vwap_threshold_ticks"] = np.nan
+    out["noise_sample_count"] = 0
+    out["noise_time_span_seconds"] = 0.0
+    out["noise_history_reliable"] = False
+    out["last_noise_median"] = np.nan
+    out["vwap_noise_median"] = np.nan
+    out["last_noise_robust_sigma"] = np.nan
+    out["vwap_noise_robust_sigma"] = np.nan
+    out["execution_depth_robust_sigma"] = np.nan
+    out["reference_blocked_reason"] = ""
+
+    # 为每个 peer 预计算与 target 行对齐的 asof mid / spread / 有效性
+    target_mids = out["mid_price"].to_numpy(dtype=float)
+    peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
+
+    # Pass 1：逐行计算 fair_price
+    for i in range(n):
+        mk = int(keys[i])
+        ws = mk - BASELINE_WINDOW_SECONDS * 1000
+        we = mk - BASELINE_EXCLUDE_RECENT_SECONDS * 1000
+        lo = int(np.searchsorted(keys, ws, side="left"))
+        hi = int(np.searchsorted(keys, we, side="right"))
+
+        fair_i_values: list[float] = []
+        valid_peers: list[str] = []
+        peer_bases: dict[str, float] = {}
+
+        for code, pa in peer_aligned.items():
+            cur_mid = pa["asof_mid"][i]
+            if not np.isfinite(cur_mid) or cur_mid <= 0:
                 continue
-            current_mid = float(current["mid_price"])
-            lookback_mid = float(lookback["mid_price"])
-            if current_mid <= 0 or lookback_mid <= 0:
+            if not pa["asof_valid"][i]:
                 continue
-            if not (
-                bool(current["is_tradable_session"])
-                and bool(lookback["is_tradable_session"])
-                and current["age_seconds"] <= max_reference_age_seconds
-                and lookback["age_seconds"] <= max_reference_age_seconds
-            ):
+            if hi - lo < BASELINE_MIN_PAIRS_PER_PEER:
                 continue
-            valid_peer_moves.append((current_mid - lookback_mid) / tick_size)
-            valid_peer_log_returns.append(math.log(current_mid / lookback_mid))
+            diffs = pa["diff"][lo:hi]
+            valid_mask = np.isfinite(diffs)
+            if valid_mask.sum() < BASELINE_MIN_PAIRS_PER_PEER:
+                continue
+            basis = float(np.median(diffs[valid_mask]))
+            peer_bases[code] = basis
+            fair_i_values.append(cur_mid + basis)
+            valid_peers.append(code)
 
-        baseline_is_usable = (
-            baseline is not None
-            and bool(baseline["is_tradable_session"])
-            and baseline["age_seconds"] <= max_reference_age_seconds
-        )
-        out.at[index, "reference_contract_count"] = len(valid_peer_moves) if baseline_is_usable else 0
-        if len(valid_peer_moves) < 2 or not baseline_is_usable:
-            if baseline is not None and not bool(baseline["is_tradable_session"]):
-                out.at[index, "full_blocked_reason"] = "session_target_baseline"
-            elif baseline is not None and baseline["age_seconds"] > max_reference_age_seconds:
-                out.at[index, "full_blocked_reason"] = "age_target_baseline"
-            elif baseline is None:
-                out.at[index, "full_blocked_reason"] = "missing_target_baseline"
-            else:
-                out.at[index, "full_blocked_reason"] = "insufficient_fresh_peers"
+        out.at[i, "valid_peer_count"] = len(valid_peers)
+        out.at[i, "peer_contracts"] = ",".join(valid_peers)
+        out.at[i, "__valid_peer_contracts"] = valid_peers
+        out.at[i, "__peer_bases"] = peer_bases
+
+        if len(valid_peers) < MIN_VALID_PEERS:
+            out.at[i, "reference_blocked_reason"] = "insufficient_peers"
             continue
 
-        baseline_mid = float(baseline["mid_price"])
-        if baseline_mid <= 0:
-            continue
-        out.at[index, "previous_last_price_at_lookback"] = float(baseline["LastPrice"])
-        out.at[index, "target_move_ticks"] = (float(row["mid_price"]) - baseline_mid) / tick_size
-        out.at[index, "last_vs_mid_down_ticks"] = max(0.0, (float(row["mid_price"]) - float(row["LastPrice"])) / tick_size)
+        fair_arr = np.array(fair_i_values, dtype=float)
+        fair_price = float(np.median(fair_arr))
+        uncertainty = _mad_sigma(fair_arr) / tick_size
+        out.at[i, "fair_price"] = fair_price
+        out.at[i, "fair_uncertainty_ticks"] = uncertainty
+        reliable = uncertainty <= FAIR_UNCERTAINTY_LIMIT_TICKS
+        out.at[i, "fair_price_reliable"] = reliable
+        if not reliable:
+            out.at[i, "reference_blocked_reason"] = "fair_uncertainty_exceeded"
 
-        out.at[index, "peer_median_move_ticks"] = float(np.median(valid_peer_moves))
-        out.at[index, "peer_move_limit_ticks"] = float(np.max(np.abs(valid_peer_moves)))
-        out.at[index, "peer_excess_down_ticks"] = max(
-            0.0,
-            float(out.at[index, "peer_median_move_ticks"]) - float(out.at[index, "target_move_ticks"]),
-        )
-
-        median_return = float(np.median(valid_peer_log_returns))
-        expected_simple = baseline_mid * math.exp(median_return)
-        out.at[index, "expected_price_simple"] = expected_simple
-        out.at[index, "down_deviation_ticks"] = (expected_simple - float(row["mid_price"])) / tick_size
-        out.at[index, "down_deviation_bps"] = ((expected_simple - float(row["mid_price"])) / expected_simple) * 10000
-        if pd.notna(row.get("snapshot_avg_trade_price")):
-            out.at[index, "snapshot_avg_trade_gap_ticks"] = max(
-                0.0,
-                (float(row["mid_price"]) - float(row["snapshot_avg_trade_price"])) / tick_size,
-            )
-
-        event_depth_candidates = [
-            float(out.at[index, "last_vs_mid_down_ticks"]),
-            float(out.at[index, "peer_excess_down_ticks"]),
-        ]
-        if pd.notna(out.at[index, "snapshot_avg_trade_gap_ticks"]):
-            event_depth_candidates.append(float(out.at[index, "snapshot_avg_trade_gap_ticks"]))
-        event_depth_ticks = max(event_depth_candidates)
-        out.at[index, "event_depth_ticks"] = event_depth_ticks
-        out.at[index, "event_depth_bps"] = event_depth_ticks * tick_size / float(row["mid_price"]) * 10000
-
-        expected_full = baseline_mid * math.exp(float(np.median(valid_peer_log_returns)))
-        out.at[index, "expected_price_full"] = expected_full
-        out.at[index, "full_blocked_reason"] = "not_blocked"
-
+    # Pass 2：noise history，复用 Pass 1 的 fair_price(s)
+    _attach_noise_history(out, tick_size)
     return out
 
 
-def _build_asof_index(frame: pd.DataFrame) -> dict[str, np.ndarray]:
-    return {
-        "timestamps": frame["timestamp"].to_numpy(dtype="datetime64[ns]"),
-        "mid_prices": frame["mid_price"].to_numpy(dtype=float),
-        "last_prices": frame["LastPrice"].to_numpy(dtype=float),
-        "is_tradable_session": frame["is_tradable_session"].fillna(False).to_numpy(dtype=bool),
-    }
+# ---------------------------------------------------------------------------
+# peer asof 对齐（向量化）
+# ---------------------------------------------------------------------------
 
 
-def _take_asof_value(index_data: dict[str, np.ndarray], query_ts: pd.Timestamp) -> dict[str, object] | None:
-    timestamps = index_data["timestamps"]
-    position = np.searchsorted(timestamps, query_ts.to_datetime64(), side="right") - 1
-    if position < 0:
-        return None
-    ts = pd.Timestamp(timestamps[position])
-    return {
-        "timestamp": ts,
-        "mid_price": float(index_data["mid_prices"][position]),
-        "LastPrice": float(index_data["last_prices"][position]),
-        "age_seconds": (query_ts - ts).total_seconds(),
-        "is_tradable_session": bool(index_data["is_tradable_session"][position]),
-    }
+def _build_peer_aligned(
+    target_df: pd.DataFrame,
+    reference_frames: dict[str, pd.DataFrame],
+    tick_size: float,
+) -> dict[str, dict[str, np.ndarray]]:
+    """为每个 peer 预计算与 target 行索引对齐的 asof mid / diff / 有效性。
+
+    asof_mid[i]  = peer 在 target_keys[i] 时刻的 asof mid（age<=3s 且有效报价，否则 nan）
+    diff[i]      = target_mid[i] - asof_mid[i]（供 basis 滑动中位数使用）
+    asof_valid[i]= 该时刻 peer 报价是否有效
+    """
+    keys = target_df["market_time_key"].to_numpy()
+    target_mids = target_df["mid_price"].to_numpy(dtype=float)
+    result: dict[str, dict[str, np.ndarray]] = {}
+    for code, frame in reference_frames.items():
+        if frame.empty:
+            continue
+        fr = frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
+        p_keys = fr["market_time_key"].to_numpy()
+        p_mids = fr["mid_price"].to_numpy(dtype=float)
+        p_bids = fr["BidPrice1"].to_numpy(dtype=float)
+        p_asks = fr["AskPrice1"].to_numpy(dtype=float)
+        p_tradable = fr["is_tradable_session"].fillna(False).to_numpy(dtype=bool)
+        p_upper = fr.get("UpperLimitPrice", pd.Series([np.inf] * len(fr))).to_numpy(dtype=float)
+        p_lower = fr.get("LowerLimitPrice", pd.Series([-np.inf] * len(fr))).to_numpy(dtype=float)
+
+        asof_mid = np.full(len(keys), np.nan)
+        asof_valid = np.zeros(len(keys), dtype=bool)
+        for i, mk in enumerate(keys):
+            pos = int(np.searchsorted(p_keys, mk, side="right") - 1)
+            if pos < 0:
+                continue
+            age_ms = mk - int(p_keys[pos])
+            if age_ms > MAX_REFERENCE_AGE_SECONDS * 1000:
+                continue
+            mid = p_mids[pos]
+            bid = p_bids[pos]
+            ask = p_asks[pos]
+            if not p_tradable[pos]:
+                continue
+            if bid <= 0 or ask <= 0 or ask < bid:
+                continue
+            if not np.isfinite(mid) or mid <= 0:
+                continue
+            ul = p_upper[pos]
+            ll = p_lower[pos]
+            if ul > 0 and mid >= ul - LIMIT_BUFFER_TICKS * tick_size:
+                continue
+            if ll > 0 and mid <= ll + LIMIT_BUFFER_TICKS * tick_size:
+                continue
+            asof_mid[i] = mid
+            asof_valid[i] = True
+
+        diff = target_mids - asof_mid
+        result[code] = {"asof_mid": asof_mid, "diff": diff, "asof_valid": asof_valid}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# noise history（Pass 2，复用已算好的 fair_price）
+# ---------------------------------------------------------------------------
+
+
+def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
+    """每个目标行 t 用 [t-300s, t-10s] 窗口的已算 fair_price(s) 生成噪声与阈值。"""
+    keys = out["market_time_key"].to_numpy()
+    n = len(out)
+    target_mids = out["mid_price"].to_numpy(dtype=float)
+    target_last = out["LastPrice"].to_numpy(dtype=float)
+    target_vwap = out["interval_vwap"].to_numpy(dtype=float)
+    target_dv = out["delta_volume"].to_numpy(dtype=float)
+    fair_prices = out["fair_price"].to_numpy(dtype=float)
+    fair_reliable = out["fair_price_reliable"].to_numpy(dtype=bool)
+
+    for i in range(n):
+        mk = int(keys[i])
+        ws = mk - BASELINE_WINDOW_SECONDS * 1000
+        we = mk - BASELINE_EXCLUDE_RECENT_SECONDS * 1000
+        lo = int(np.searchsorted(keys, ws, side="left"))
+        hi = int(np.searchsorted(keys, we, side="right"))
+        if lo >= hi:
+            if not out.at[i, "reference_blocked_reason"]:
+                out.at[i, "reference_blocked_reason"] = "insufficient_noise_history"
+            continue
+
+        last_noise: list[float] = []
+        vwap_noise: list[float] = []
+        for s in range(lo, hi):
+            if not (np.isfinite(target_dv[s]) and target_dv[s] > 0):
+                continue
+            if not fair_reliable[s]:
+                continue
+            fp = fair_prices[s]
+            if not np.isfinite(fp) or fp <= 0:
+                continue
+            last = target_last[s]
+            if np.isfinite(last) and last > 0:
+                last_noise.append((fp - last) / tick_size)
+            vwap = target_vwap[s]
+            if np.isfinite(vwap) and vwap > 0:
+                vwap_noise.append((fp - vwap) / tick_size)
+
+        span = (int(keys[hi - 1]) - int(keys[lo])) / 1000.0 if hi > lo else 0.0
+        out.at[i, "noise_sample_count"] = len(last_noise)
+        out.at[i, "noise_time_span_seconds"] = span
+        reliable = len(last_noise) >= NOISE_MIN_SAMPLE_COUNT and span >= NOISE_MIN_SPAN_SECONDS
+        out.at[i, "noise_history_reliable"] = reliable
+        if not reliable:
+            if not out.at[i, "reference_blocked_reason"]:
+                out.at[i, "reference_blocked_reason"] = "insufficient_noise_history"
+            continue
+
+        last_arr = np.array(last_noise, dtype=float)
+        vwap_arr = np.array(vwap_noise, dtype=float)
+        depth_arr = np.maximum(last_arr, vwap_arr)
+
+        last_med = float(np.median(last_arr))
+        vwap_med = float(np.median(vwap_arr))
+        last_sigma = _mad_sigma(last_arr)
+        vwap_sigma = _mad_sigma(vwap_arr)
+        depth_sigma = _mad_sigma(depth_arr)
+
+        out.at[i, "last_noise_median"] = last_med
+        out.at[i, "vwap_noise_median"] = vwap_med
+        out.at[i, "last_noise_robust_sigma"] = last_sigma
+        out.at[i, "vwap_noise_robust_sigma"] = vwap_sigma
+        out.at[i, "execution_depth_robust_sigma"] = depth_sigma
+
+        fp_t = fair_prices[i]
+        min_depth_ticks = fp_t * MIN_DEPTH_BPS / 10000 / tick_size if np.isfinite(fp_t) and fp_t > 0 else 0.0
+        out.at[i, "last_threshold_ticks"] = max(MIN_LAST_TICKS, min_depth_ticks, last_med + NOISE_K * last_sigma)
+        out.at[i, "vwap_threshold_ticks"] = max(MIN_VWAP_TICKS, min_depth_ticks, vwap_med + NOISE_K * vwap_sigma)
+
+
+def _mad_sigma(arr: np.ndarray) -> float:
+    if len(arr) == 0:
+        return float("nan")
+    med = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - med)))
+    return 1.4826 * mad
