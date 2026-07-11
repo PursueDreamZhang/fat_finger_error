@@ -34,6 +34,8 @@ DAY_SESSION_RANGES = (
     ("10:30:00", "11:30:00"),
     ("13:30:00", "15:00:00"),
 )
+NIGHT_SESSION_END = "02:30:00"
+NIGHT_SESSION_START = "21:00:00"
 CONTRACT_MULTIPLIERS = {"AU": 1000}
 
 
@@ -122,12 +124,8 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
     )
     df["session_state"] = df["UpdateTime"].map(_session_state)
     df["is_tradable_session"] = df["UpdateTime"].map(_is_tradable_session)
-    df["night_session_coverage"] = bool((~df["is_tradable_session"]).any())
-    df = df.loc[df["is_tradable_session"]].copy()
-    if df.empty:
-        return df
     df = df.sort_values(["timestamp", "snapshot_seq"], kind="stable").reset_index(drop=True)
-    df["night_session_coverage"] = bool(raw_df["UpdateTime"].map(_is_tradable_session).eq(False).any())
+    df["night_session_coverage"] = bool(df["session_state"].eq("night_trading").any())
 
     df["mid_price"] = np.where(
         (df["BidPrice1"] > 0) & (df["AskPrice1"] > 0) & (df["AskPrice1"] >= df["BidPrice1"]),
@@ -168,17 +166,27 @@ def _session_state(update_time: str) -> str:
     for start, end in DAY_SESSION_RANGES:
         if start <= update_time < end:
             return "continuous_trading"
-    if update_time < "09:00:00":
+    if _is_night_trading(update_time):
+        return "night_trading"
+    if ("08:55:00" <= update_time < "09:00:00") or ("20:55:00" <= update_time < "21:00:00"):
         return "pre_open_snapshot"
+    if update_time < "09:00:00":
+        return "closed_break"
     if "10:15:00" <= update_time < "10:30:00":
         return "intermission"
     if "11:30:00" <= update_time < "13:30:00":
         return "lunch"
+    if "15:00:00" <= update_time < NIGHT_SESSION_START:
+        return "closed_break"
     return "off_session"
 
 
 def _is_tradable_session(update_time: str) -> bool:
-    return _session_state(update_time) == "continuous_trading"
+    return _session_state(update_time) in {"continuous_trading", "night_trading"}
+
+
+def _is_night_trading(update_time: str) -> bool:
+    return update_time >= NIGHT_SESSION_START or update_time < NIGHT_SESSION_END
 
 
 def _average_price_matches_multiplier(df: pd.DataFrame, multiplier: int) -> pd.Series:

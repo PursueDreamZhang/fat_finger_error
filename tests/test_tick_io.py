@@ -117,13 +117,14 @@ def test_load_contract_snapshots_parses_real_contract_metadata(tmp_path):
     assert df["trade_date"].iloc[0] == "20260520"
 
 
-def test_prepare_contract_snapshots_filters_to_day_session_and_preserves_snapshot_seq_order():
+def test_prepare_contract_snapshots_keeps_night_anchor_and_preserves_snapshot_seq_order():
     raw = pd.DataFrame(
         [
             _tick_row("au2606", "08:59:59", 0, last_price=100.0, volume=10, turnover=1000000.0),
             _tick_row("au2606", "09:00:00", 0, last_price=100.0, volume=10, turnover=1000000.0),
             _tick_row("au2606", "09:00:00", 0, last_price=100.2, volume=12, turnover=1200400.0),
             _tick_row("au2606", "10:30:00", 0, last_price=100.4, volume=14, turnover=1401200.0),
+            _tick_row("au2606", "21:04:35", 500, last_price=99.8, volume=20, turnover=2000000.0),
         ]
     )
     raw["commodity"] = "AU"
@@ -133,13 +134,22 @@ def test_prepare_contract_snapshots_filters_to_day_session_and_preserves_snapsho
 
     df = prepare_contract_snapshots(raw)
 
-    assert df["snapshot_seq"].tolist() == [1, 2, 3]
-    assert df["is_tradable_session"].all()
-    assert df["session_state"].eq("continuous_trading").all()
+    assert df["snapshot_seq"].tolist() == [0, 1, 2, 3, 4]
+    assert df["timestamp"].iloc[-1] == pd.Timestamp("2026-05-20 21:04:35.500")
+    assert df["session_state"].tolist() == [
+        "pre_open_snapshot",
+        "continuous_trading",
+        "continuous_trading",
+        "continuous_trading",
+        "night_trading",
+    ]
+    assert df["is_tradable_session"].tolist() == [False, True, True, True, True]
     assert math.isnan(df["delta_volume"].iloc[0])
-    assert df["delta_volume"].iloc[1] == 2
-    assert math.isnan(df["delta_volume"].iloc[2])
-    assert df["night_session_coverage"].tolist() == [True, True, True]
+    assert math.isnan(df["delta_volume"].iloc[1])
+    assert df["delta_volume"].iloc[2] == 2
+    assert math.isnan(df["delta_volume"].iloc[3])
+    assert math.isnan(df["delta_volume"].iloc[4])
+    assert df["night_session_coverage"].tolist() == [True, True, True, True, True]
 
 
 def test_prepare_contract_snapshots_disables_avg_trade_trigger_when_multiplier_check_fails():

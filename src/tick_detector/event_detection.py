@@ -5,33 +5,68 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-MIN_DEVIATION_BPS = 30
-MIN_DOWN_DEVIATION_TICKS = 3
-MAX_SPREAD_TICKS = 3
-MAX_PEER_MOVE_TICKS = 3
+MIN_EVENT_DELTA_VOLUME = 10
+MIN_REFERENCE_CONTRACT_COUNT = 2
+MAX_SPREAD_TICKS = 20
+STRONG_SIGNAL_MAX_SPREAD_TICKS = 25
+MIN_LAST_VS_MID_DOWN_TICKS = 20
+MIN_PEER_EXCESS_DOWN_TICKS = 20
+STRONG_SIGNAL_MIN_DELTA_VOLUME = 50
+STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS = 50
+STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS = 10
+MIN_AVG_TRADE_GAP_TICKS = 20
+LIMIT_BUFFER_TICKS = 2
 MERGE_WINDOW_SECONDS = 10
 RECOVERY_WINDOWS = (10, 30)
+OPEN_GUARD_SECONDS = 60
+OPEN_GUARD_TIMES = ("09:00:00", "09:30:00", "21:00:00")
 
 
 def detect_candidate_ticks(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     out = df.copy()
-    out["abs_last_mid_gap_ticks"] = (out["LastPrice"] - out["mid_price"]).abs()
-    mask = (
+    base_mask = (
         (out["delta_volume"] > 0)
-        & (out["spread_ticks"] <= MAX_SPREAD_TICKS)
-        & (out["reference_contract_count"] >= 2)
-        & (out["peer_move_limit_ticks"] <= MAX_PEER_MOVE_TICKS)
-        & (out["abs_last_mid_gap_ticks"] <= 0.02)
-        & (out["down_deviation_bps"] >= MIN_DEVIATION_BPS)
-        & (out["down_deviation_ticks"] >= MIN_DOWN_DEVIATION_TICKS)
+        & (out["delta_volume"] >= MIN_EVENT_DELTA_VOLUME)
+        & (out["reference_contract_count"] >= MIN_REFERENCE_CONTRACT_COUNT)
+        & (out["LastPrice"] > (out["LowerLimitPrice"] + LIMIT_BUFFER_TICKS * _infer_tick_size_from_row(out)))
+        & (~out.apply(_is_open_guard_window, axis=1))
     )
-    out = out.loc[mask].copy()
+
+    visible_regular_mask = (
+        (out["last_vs_mid_down_ticks"] >= MIN_LAST_VS_MID_DOWN_TICKS)
+        & (out["peer_excess_down_ticks"] >= MIN_PEER_EXCESS_DOWN_TICKS)
+        & (out["spread_ticks"] <= MAX_SPREAD_TICKS)
+    )
+    visible_strong_signal_mask = (
+        (out["delta_volume"] >= STRONG_SIGNAL_MIN_DELTA_VOLUME)
+        & (out["last_vs_mid_down_ticks"] >= STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS)
+        & (out["spread_ticks"] <= STRONG_SIGNAL_MAX_SPREAD_TICKS)
+        & (out["peer_excess_down_ticks"] >= STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS)
+    )
+    hidden_mask = (
+        out["snapshot_avg_trade_gap_ticks"].notna()
+        & (out["snapshot_avg_trade_gap_ticks"] >= MIN_AVG_TRADE_GAP_TICKS)
+    )
+    out = out.loc[base_mask & (visible_regular_mask | visible_strong_signal_mask | hidden_mask)].copy()
     if out.empty:
         return out
     out["trigger_reasons"] = out.apply(_build_trigger_reasons, axis=1)
     return out
+
+
+def _is_open_guard_window(row: pd.Series) -> bool:
+    timestamp = row.get("timestamp")
+    if pd.isna(timestamp):
+        return False
+    current = pd.Timestamp(timestamp)
+    for open_time in OPEN_GUARD_TIMES:
+        anchor = pd.Timestamp(f"{current.date()} {open_time}")
+        delta_seconds = (current - anchor).total_seconds()
+        if 0 <= delta_seconds < OPEN_GUARD_SECONDS:
+            return True
+    return False
 
 
 def merge_candidates(candidates: pd.DataFrame, merge_window_seconds: int = MERGE_WINDOW_SECONDS) -> pd.DataFrame:
@@ -47,7 +82,7 @@ def merge_candidates(candidates: pd.DataFrame, merge_window_seconds: int = MERGE
             if not should_flush:
                 continue
             window = rows.iloc[group_start:idx].copy()
-            anchor = window.sort_values(["down_deviation_ticks", "timestamp", "snapshot_seq"], ascending=[False, True, True], kind="stable").iloc[0]
+            anchor = window.sort_values(["event_depth_ticks", "timestamp", "snapshot_seq"], ascending=[False, True, True], kind="stable").iloc[0]
             trigger_reasons = ""
             if "trigger_reasons" in window.columns:
                 trigger_reasons = ",".join(sorted(set(window["trigger_reasons"].dropna())))
@@ -61,8 +96,11 @@ def merge_candidates(candidates: pd.DataFrame, merge_window_seconds: int = MERGE
                     "event_end_time": window["timestamp"].max(),
                     "event_low_price": float(window["LastPrice"].min()),
                     "event_volume": float(window.loc[window["delta_volume"] > 0, "delta_volume"].sum()),
-                    "event_depth_ticks": float(window["down_deviation_ticks"].max()),
-                    "recovery_denominator_ticks": float(window["down_deviation_ticks"].max()),
+                    "event_depth_ticks": float(window["event_depth_ticks"].max()),
+                    "recovery_denominator_ticks": max(
+                        1.0,
+                        (float(anchor["mid_price"]) - float(window["LastPrice"].min())) / _infer_tick_size_from_row(window),
+                    ),
                     "reference_contract_count": int(anchor["reference_contract_count"]),
                     "trigger_reasons": trigger_reasons,
                 }
@@ -140,8 +178,40 @@ def attach_recovery_metrics(events_df: pd.DataFrame, contract_df: pd.DataFrame, 
 
 def _build_trigger_reasons(row: pd.Series) -> str:
     reasons: list[str] = []
-    if pd.notna(row.get("last_vs_mid_down_ticks")) and float(row["last_vs_mid_down_ticks"]) > 0:
+    if (
+        pd.notna(row.get("last_vs_mid_down_ticks"))
+        and pd.notna(row.get("peer_excess_down_ticks"))
+        and float(row["last_vs_mid_down_ticks"]) >= MIN_LAST_VS_MID_DOWN_TICKS
+        and float(row["peer_excess_down_ticks"]) >= MIN_PEER_EXCESS_DOWN_TICKS
+        and pd.notna(row.get("spread_ticks"))
+        and float(row["spread_ticks"]) <= MAX_SPREAD_TICKS
+    ):
         reasons.append("visible_last_drop")
-    if pd.notna(row.get("snapshot_avg_trade_gap_ticks")) and float(row["snapshot_avg_trade_gap_ticks"]) > 0:
+    if (
+        pd.notna(row.get("delta_volume"))
+        and pd.notna(row.get("last_vs_mid_down_ticks"))
+        and pd.notna(row.get("peer_excess_down_ticks"))
+        and pd.notna(row.get("spread_ticks"))
+        and float(row["delta_volume"]) >= STRONG_SIGNAL_MIN_DELTA_VOLUME
+        and float(row["last_vs_mid_down_ticks"]) >= STRONG_SIGNAL_MIN_LAST_VS_MID_DOWN_TICKS
+        and float(row["spread_ticks"]) <= STRONG_SIGNAL_MAX_SPREAD_TICKS
+        and float(row["peer_excess_down_ticks"]) >= STRONG_SIGNAL_MIN_PEER_EXCESS_DOWN_TICKS
+    ):
+        reasons.append("strong_visible_last_drop")
+    if pd.notna(row.get("snapshot_avg_trade_gap_ticks")) and float(row["snapshot_avg_trade_gap_ticks"]) >= MIN_AVG_TRADE_GAP_TICKS:
         reasons.append("hidden_avg_trade_drop")
     return ",".join(reasons)
+
+
+def _infer_tick_size_from_row(df_or_row: pd.DataFrame | pd.Series) -> float:
+    spread_ticks = df_or_row["spread_ticks"]
+    spread = df_or_row["spread"]
+    if isinstance(df_or_row, pd.DataFrame):
+        valid = df_or_row.loc[pd.notna(spread_ticks) & (spread_ticks > 0) & pd.notna(spread) & (spread > 0), ["spread", "spread_ticks"]]
+        if valid.empty:
+            return 1.0
+        sample = valid.iloc[0]
+        return float(sample["spread"]) / float(sample["spread_ticks"])
+    if pd.notna(spread_ticks) and float(spread_ticks) > 0 and pd.notna(spread) and float(spread) > 0:
+        return float(spread) / float(spread_ticks)
+    return 1.0
