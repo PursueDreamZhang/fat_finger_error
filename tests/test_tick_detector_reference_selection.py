@@ -217,6 +217,63 @@ def test_fair_price_unreliable_when_uncertainty_exceeds_limit():
     assert row["fair_price_reliable"] is False or row["fair_price_reliable"] == False  # noqa: E712
 
 
+def test_peer_with_abnormal_spread_excluded_from_fair_price():
+    """peer 报价 spread 超过 baseline_spread_p95 + 1 tick 时不进 fair_price。
+
+    peer_b 的 spread 持续远大于正常（1 tick），应被排除。
+    """
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    for sec in range(300):
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.98, ask_price=100.0))  # spread=1 tick
+        peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.98, ask_price=100.0))  # spread=1 tick
+        # peer_b spread=50 tick，远超正常
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.0, ask_price=100.0))  # spread=50 tick
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(
+        target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02
+    )
+    row = out.iloc[-1]
+    # peer_b spread 异常 -> 只剩 peer_a 一个有效 peer -> 不可靠
+    assert "AU2610" not in str(row["peer_contracts"])
+
+
+def test_basis_requires_at_least_60s_coverage():
+    """peer 基线配对点虽够 20 个但覆盖不足 60 秒时不进 fair_price。
+
+    peer_a 在 [t-30s, t] 内每秒密集报价（含 t 时刻保证 fresh），30 个点 > 20，
+    但基线窗 [t-300s, t-10s] 内仅 [t-30s, t-10s] 有数据，跨度 20s < 60s。
+    """
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    for sec in range(300):
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}"))
+    # peer_a 在 [270, 299] 每秒报价（含 t=299 保证 age=0 fresh）
+    for sec in range(270, 300):
+        peer_a_rows.append(_mk("AU2608", sec * 1000, mid_price=100.0, display_time=f"t{sec}"))
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(
+        target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02
+    )
+    row = out.iloc[-1]  # t299: peer_a 当前 fresh(age=0)，基线窗内 [270s,289s] 跨度 19s < 60s
+    # peer_a 基线跨度不足 60s -> 不进 fair_price
+    assert "AU2608" not in str(row["peer_contracts"])
+
+
 # ---------------------------------------------------------------------------
 # noise history
 # ---------------------------------------------------------------------------

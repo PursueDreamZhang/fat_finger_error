@@ -271,6 +271,22 @@ def test_diff_blocked_on_volume_reset_or_zero_delta():
     assert math.isnan(df["delta_volume"].iloc[2])
 
 
+def test_diff_blocked_on_intra_session_data_gap_over_3s():
+    """同一 session 内相邻时间键 gap > MAX_DATA_GAP_SECONDS(3s) 视为数据断点,不可差分。"""
+    raw = _au_raw(
+        [
+            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0),
+            _tick_row("au2606", "09:01:31", 0, volume=110, turnover=11000000.0),   # gap=1s 连续
+            _tick_row("au2606", "09:01:36", 0, volume=200, turnover=20000000.0),   # gap=5s > 3s 断点
+        ]
+    )
+    df = prepare_contract_snapshots(raw)
+    by_time = dict(zip(df["display_time"], df["delta_volume"]))
+
+    assert by_time["09:01:31.000"] == pytest.approx(10.0)   # gap=1s 连续,可差分
+    assert math.isnan(by_time["09:01:36.000"])               # gap=5s > 3s,断点不可差分
+
+
 # ---------------------------------------------------------------------------
 # 开盘保护
 # ---------------------------------------------------------------------------

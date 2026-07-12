@@ -178,6 +178,20 @@ def test_interval_drop_blocked_on_gap_over_confirmation_limit():
     assert out.empty
 
 
+def test_interval_drop_blocked_when_window_has_nan_or_zero_delta():
+    """确认窗内出现 NaN 或零增量行时视为不完整，区间分支不触发。
+
+    设计文档 §7.1：确认窗内所有累计增量必须有效。
+    mk=10000 vwap异常, mk=11000 delta_volume=NaN -> 计数器不同步未确认。
+    """
+    df = _df([
+        _row(10000, last_price=100.0, interval_vwap=99.0, delta_volume=10, delta_turnover=990000),
+        _row(11000, last_price=100.0, interval_vwap=99.0, delta_volume_nan=True),  # delta_volume=NaN
+    ])
+    out = detect_candidate_ticks(df)
+    assert out.empty
+
+
 def test_interval_drop_blocked_on_cross_session():
     """跨 session 的 1s 窗口不可确认"""
     df = _df([
@@ -581,3 +595,48 @@ def test_recovery_does_not_re_estimate_threshold_from_future():
     recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
     # 恢复判断使用锚点阈值 anchor_thr=20，不应被未来帧的阈值覆盖
     assert recovered["last_threshold_ticks"].iloc[0] == pytest.approx(anchor_thr)
+
+
+def test_recovery_marks_truncated_when_peer_quote_invalid():
+    """恢复阶段参考价失效（peer 报价无效或不足）时标 truncated。
+
+    peer 报价在锚点后全部失效（mid<=0），recovery_fair_price 无法计算 -> truncated。
+    """
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        _row(11000, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    # peer 报价无效（mid=0）
+    peer_a = _peer_frame("AU2608", [_peer_row(10000, 100.0), _peer_row(11000, 0.0)])
+    peer_b = _peer_frame("AU2610", [_peer_row(10000, 100.0), _peer_row(11000, 0.0)])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    assert recovered["recovery_label"].iloc[0] == "truncated"
+
+
+def test_recovery_marks_truncated_when_peer_stale():
+    """恢复阶段 peer 报价 age > 3s（陈旧）时参考价失效 -> truncated。"""
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        _candidate(10000, depth=50.0, last_price=99.0, interval_vwap=99.0,
+                   delta_volume=10, delta_turnover=990000,
+                   trigger_reasons="visible_execution_drop,interval_execution_drop"),
+        _row(14000, last_price=100.0, interval_vwap=100.0, delta_volume=10, delta_turnover=1000000),
+    ])
+    candidates = enriched[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    # peer 在 14000 时刻只有 10000 的报价（age=4s > 3s -> 陈旧）
+    peer_a = _peer_frame("AU2608", [_peer_row(10000, 100.0)])
+    peer_b = _peer_frame("AU2610", [_peer_row(10000, 100.0)])
+    profile = {"tick_size": 0.02, "contract_multiplier": 1000}
+    recovered = attach_recovery_metrics(events, enriched, {"AU2608": peer_a, "AU2610": peer_b}, profile)
+    assert recovered["recovery_label"].iloc[0] == "truncated"

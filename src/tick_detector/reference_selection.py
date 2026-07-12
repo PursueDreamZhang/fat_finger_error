@@ -83,12 +83,22 @@ def attach_fair_price_metrics(
     peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
 
     # Pass 1：逐行计算 fair_price
+    target_spread_ticks = target_df["spread_ticks"].to_numpy(dtype=float) if "spread_ticks" in target_df.columns else np.full(n, np.nan)
     for i in range(n):
         mk = int(keys[i])
         ws = mk - BASELINE_WINDOW_SECONDS * 1000
         we = mk - BASELINE_EXCLUDE_RECENT_SECONDS * 1000
         lo = int(np.searchsorted(keys, ws, side="left"))
         hi = int(np.searchsorted(keys, we, side="right"))
+
+        # 目标基线 spread p95（设计文档 §5.1：spread_ticks <= p95 + 1）
+        baseline_spread_p95 = np.inf
+        if hi > lo:
+            window_spreads = target_spread_ticks[lo:hi]
+            valid_spreads = window_spreads[np.isfinite(window_spreads)]
+            if len(valid_spreads) >= BASELINE_MIN_PAIRS_PER_PEER:
+                baseline_spread_p95 = float(np.percentile(valid_spreads, 95))
+        spread_limit_ticks = baseline_spread_p95 + 1
 
         fair_i_values: list[float] = []
         valid_peers: list[str] = []
@@ -98,13 +108,25 @@ def attach_fair_price_metrics(
             cur_mid = pa["asof_mid"][i]
             if not np.isfinite(cur_mid) or cur_mid <= 0:
                 continue
-            if not pa["asof_valid"][i]:
+            if not pa["asof_base_valid"][i]:
+                continue
+            # spread <= p95 + 1 tick
+            cur_spread = pa["asof_spread_ticks"][i]
+            if not np.isfinite(cur_spread) or cur_spread > spread_limit_ticks:
                 continue
             if hi - lo < BASELINE_MIN_PAIRS_PER_PEER:
                 continue
             diffs = pa["diff"][lo:hi]
             valid_mask = np.isfinite(diffs)
             if valid_mask.sum() < BASELINE_MIN_PAIRS_PER_PEER:
+                continue
+            # 基线覆盖时长 >= 60s（设计文档 §5.2）
+            peer_keys_window = pa["asof_key"][lo:hi]
+            peer_keys_valid = peer_keys_window[np.isfinite(peer_keys_window)]
+            if len(peer_keys_valid) < 2:
+                continue
+            span_ms = int(peer_keys_valid.max()) - int(peer_keys_valid.min())
+            if span_ms < BASELINE_MIN_SPAN_PER_PEER_SECONDS * 1000:
                 continue
             basis = float(np.median(diffs[valid_mask]))
             peer_bases[code] = basis
@@ -145,11 +167,13 @@ def _build_peer_aligned(
     reference_frames: dict[str, pd.DataFrame],
     tick_size: float,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """为每个 peer 预计算与 target 行索引对齐的 asof mid / diff / 有效性。
+    """为每个 peer 预计算与 target 行索引对齐的 asof mid / spread / diff / 有效性。
 
-    asof_mid[i]  = peer 在 target_keys[i] 时刻的 asof mid（age<=3s 且有效报价，否则 nan）
-    diff[i]      = target_mid[i] - asof_mid[i]（供 basis 滑动中位数使用）
-    asof_valid[i]= 该时刻 peer 报价是否有效
+    asof_mid[i]      = peer 在 target_keys[i] 时刻的 asof mid（age<=3s 且报价基本有效，否则 nan）
+    asof_spread_ticks[i] = 该时刻 peer asof 的 spread_ticks
+    asof_key[i]      = peer asof 对应的 market_time_key（供基线跨度检查）
+    diff[i]          = target_mid[i] - asof_mid[i]（供 basis 滑动中位数使用）
+    asof_base_valid[i] = 该时刻 peer 报价是否满足 age/时段/涨跌停等基本有效性（不含 spread p95 过滤）
     """
     keys = target_df["market_time_key"].to_numpy()
     target_mids = target_df["mid_price"].to_numpy(dtype=float)
@@ -167,7 +191,9 @@ def _build_peer_aligned(
         p_lower = fr.get("LowerLimitPrice", pd.Series([-np.inf] * len(fr))).to_numpy(dtype=float)
 
         asof_mid = np.full(len(keys), np.nan)
-        asof_valid = np.zeros(len(keys), dtype=bool)
+        asof_spread_ticks = np.full(len(keys), np.nan)
+        asof_key = np.full(len(keys), np.nan)
+        asof_base_valid = np.zeros(len(keys), dtype=bool)
         for i, mk in enumerate(keys):
             pos = int(np.searchsorted(p_keys, mk, side="right") - 1)
             if pos < 0:
@@ -191,10 +217,18 @@ def _build_peer_aligned(
             if ll > 0 and mid <= ll + LIMIT_BUFFER_TICKS * tick_size:
                 continue
             asof_mid[i] = mid
-            asof_valid[i] = True
+            asof_spread_ticks[i] = (ask - bid) / tick_size
+            asof_key[i] = int(p_keys[pos])
+            asof_base_valid[i] = True
 
         diff = target_mids - asof_mid
-        result[code] = {"asof_mid": asof_mid, "diff": diff, "asof_valid": asof_valid}
+        result[code] = {
+            "asof_mid": asof_mid,
+            "asof_spread_ticks": asof_spread_ticks,
+            "asof_key": asof_key,
+            "diff": diff,
+            "asof_base_valid": asof_base_valid,
+        }
     return result
 
 
@@ -227,6 +261,7 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
 
         last_noise: list[float] = []
         vwap_noise: list[float] = []
+        depth_noise: list[float] = []  # 逐点 max(last, vwap)
         for s in range(lo, hi):
             if not (np.isfinite(target_dv[s]) and target_dv[s] > 0):
                 continue
@@ -236,11 +271,18 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
             if not np.isfinite(fp) or fp <= 0:
                 continue
             last = target_last[s]
-            if np.isfinite(last) and last > 0:
-                last_noise.append((fp - last) / tick_size)
             vwap = target_vwap[s]
-            if np.isfinite(vwap) and vwap > 0:
-                vwap_noise.append((fp - vwap) / tick_size)
+            ln = (fp - last) / tick_size if np.isfinite(last) and last > 0 else None
+            vn = (fp - vwap) / tick_size if np.isfinite(vwap) and vwap > 0 else None
+            # 设计文档 §6.1: execution_depth_noise(s) = max(last_noise(s), vwap_noise(s))
+            candidates = [v for v in (ln, vn) if v is not None]
+            if ln is not None:
+                last_noise.append(ln)
+            if vn is not None:
+                vwap_noise.append(vn)
+            # 逐点 max 仅在该点两通道都有值时取 max；否则取存在的那个
+            if candidates:
+                depth_noise.append(max(candidates))
 
         span = (int(keys[hi - 1]) - int(keys[lo])) / 1000.0 if hi > lo else 0.0
         out.at[i, "noise_sample_count"] = len(last_noise)
@@ -259,9 +301,9 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
         vwap_med = float(np.median(vwap_arr)) if len(vwap_arr) else 0.0
         last_sigma = _mad_sigma(last_arr) if len(last_arr) else 0.0
         vwap_sigma = _mad_sigma(vwap_arr) if len(vwap_arr) else 0.0
-        # execution_depth_robust_sigma: 取两通道各自深度噪声的并集
-        depth_all = np.concatenate([last_arr, vwap_arr]) if len(last_arr) and len(vwap_arr) else (last_arr if len(last_arr) else vwap_arr)
-        depth_sigma = _mad_sigma(depth_all) if len(depth_all) else 0.0
+        # 设计文档 §6.1: execution_depth_robust_sigma = 1.4826 * MAD(max(last_noise, vwap_noise))
+        depth_arr = np.array(depth_noise, dtype=float)
+        depth_sigma = _mad_sigma(depth_arr) if len(depth_arr) else 0.0
 
         out.at[i, "last_noise_median"] = last_med
         out.at[i, "vwap_noise_median"] = vwap_med

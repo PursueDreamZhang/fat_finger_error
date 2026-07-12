@@ -309,17 +309,23 @@ def _is_open_protected_row(row: pd.Series) -> bool:
 
 
 def _invalidate_blocked_diffs(df: pd.DataFrame) -> None:
-    """session 首条、非可交易行、开盘保护、回退或零增量 -> 差分失效。"""
+    """session 首条、非可交易行、开盘保护、数据断点(gap>3s)、回退或零增量 -> 差分失效。"""
     n = len(df)
     if n == 0:
         return
     invalidate = np.zeros(n, dtype=bool)
     invalidate[0] = True  # session 首条
+    keys = df["market_time_key"].to_numpy()
     for i in range(1, n):
         prev_tradable = bool(df["is_tradable_session"].iloc[i - 1])
         cur_tradable = bool(df["is_tradable_session"].iloc[i])
         if not (prev_tradable and cur_tradable):
             # 跨 session 或非可交易行
+            invalidate[i] = True
+            continue
+        # 同一 session 内相邻时间键 gap > MAX_DATA_GAP_SECONDS(3s) 视为数据断点
+        gap_ms = int(keys[i]) - int(keys[i - 1])
+        if gap_ms > MAX_DATA_GAP_SECONDS * 1000:
             invalidate[i] = True
     # 开盘保护行不差分
     invalidate = invalidate | df["is_open_protected"].to_numpy(dtype=bool)

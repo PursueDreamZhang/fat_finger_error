@@ -38,8 +38,8 @@ CSV_COLUMNS: list[tuple[str, str]] = [
     ("commodity", "品种"),
     ("contract", "合约"),
     ("event_start_key", "事件开始序号"),
-    ("event_anchor_key", "事件锚点开始序号"),
-    ("event_anchor_key", "事件锚点结束序号"),
+    ("event_anchor_start_key", "事件锚点开始序号"),
+    ("event_anchor_end_key", "事件锚点结束序号"),
     ("event_end_key", "事件结束序号"),
     ("trigger_reasons", "触发原因"),
     ("fair_price", "合理价"),
@@ -364,7 +364,10 @@ def _build_target_detail(window: pd.DataFrame, event: pd.Series) -> list[dict[st
         "delta_volume", "delta_turnover", "interval_vwap",
         "fair_price", "last_down_ticks", "vwap_down_ticks",
     ]
+    # market_time_key 不展示但需保留以标记候选锚点
     available = [c for c in detail_cols if c in window.columns]
+    if "market_time_key" in window.columns:
+        available.append("market_time_key")
     anchor_key = int(event["event_anchor_key"])
     records = []
     for _, row in window[available].iterrows():

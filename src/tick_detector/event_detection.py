@@ -5,14 +5,13 @@ import math
 import numpy as np
 import pandas as pd
 
-from src.tick_detector.tick_io import MAX_DATA_GAP_SECONDS
-
-# 1 秒均价确认窗的采样完整性条件（比数据断点更严格）
-MAX_CONFIRMATION_GAP_SECONDS = 1
+from src.tick_detector.reference_selection import MAX_REFERENCE_AGE_SECONDS
+from src.tick_detector.tick_io import MAX_CONFIRMATION_GAP_SECONDS, MAX_DATA_GAP_SECONDS
 
 # onset 窗口
 ONSET_WINDOW_SECONDS = 3
 ONSET_MIN_TICKS = 8
+LIMIT_BUFFER_TICKS = 2
 ONSET_K_SIGMA = 5
 
 # 事件合并
@@ -194,13 +193,18 @@ def _compute_1s_confirmation(
                     "confirmation_end_key": np.nan, "block_reason": block_reason}
         dv = df.at[j, "delta_volume"]
         dt = df.at[j, "delta_turnover"]
-        if np.isfinite(dv) and dv > 0 and np.isfinite(dt) and dt > 0:
-            total_dv += dv
-            total_dt += dt
-        elif np.isfinite(dv) and dv < 0:
+        # 设计文档 §7.1：确认窗内所有累计增量必须有效。
+        # NaN 或零增量行不可静默跳过，视为计数器同步未确认。
+        if not np.isfinite(dv) or not np.isfinite(dt):
             block_reason = "counter_sync_unconfirmed"
             return {"combined_vwap": np.nan, "window_complete": False,
                     "confirmation_end_key": np.nan, "block_reason": block_reason}
+        if dv <= 0 or dt <= 0:
+            block_reason = "counter_sync_unconfirmed"
+            return {"combined_vwap": np.nan, "window_complete": False,
+                    "confirmation_end_key": np.nan, "block_reason": block_reason}
+        total_dv += dv
+        total_dt += dt
         last_mk = mk
         if mk >= end_mk:
             window_complete = True
@@ -335,6 +339,8 @@ def merge_candidates(
             "display_trade_date": anchor.get("display_trade_date", anchor["trade_date"]),
             "event_anchor_time": anchor.get("display_time"),
             "event_anchor_key": anchor_key,
+            "event_anchor_start_key": int(anchor.get("snapshot_seq_start", anchor_key)),
+            "event_anchor_end_key": int(anchor.get("snapshot_seq_end", anchor_key)),
             "event_start_key": start_key,
             "event_end_key": end_key,
             "event_volume": event_volume,
@@ -452,6 +458,7 @@ def attach_recovery_metrics(
         visible_recovered_sec = np.nan
         interval_recovered_sec = np.nan
         quote_recovered_sec = np.nan
+        any_valid_recovery_fp = False
 
         for wpos in window_rows:
             mk = int(fkeys[wpos])
@@ -460,9 +467,10 @@ def attach_recovery_metrics(
             if wpos == anchor_pos:
                 continue
             # 逐通道判断恢复（使用冻结 basis 的 recovery_fair_price）
-            rec_fp = _recovery_fair_price(mk, peer_aligned, peer_contracts, peer_bases)
+            rec_fp = _recovery_fair_price(mk, peer_aligned, peer_contracts, peer_bases, tick_size)
             if rec_fp is None:
                 continue
+            any_valid_recovery_fp = True
             last = frame.at[wpos, "LastPrice"]
             dv = frame.at[wpos, "delta_volume"]
             # 可见通道
@@ -485,6 +493,12 @@ def attach_recovery_metrics(
                     quote_rem = (rec_fp - bid) / tick_size
                     if quote_rem < anchor_thr_last:
                         quote_recovered_sec = elapsed
+
+        # 设计文档 §8：参考价失效（peer 报价无效或不足）时输出 truncated
+        if not any_valid_recovery_fp:
+            out.at[ei, "recovery_label"] = "truncated"
+            out.at[ei, "recovery_truncated"] = True
+            continue
 
         out.at[ei, "visible_recovered_seconds"] = visible_recovered_sec
         out.at[ei, "interval_recovered_seconds"] = interval_recovered_sec
@@ -564,6 +578,7 @@ def _collect_recovery_window(
 def _build_recovery_peer_index(
     reference_frames: dict[str, pd.DataFrame],
 ) -> dict[str, dict[str, np.ndarray]]:
+    """为恢复阶段构建 peer 索引，保留报价有效性所需的全部字段。"""
     result: dict[str, dict[str, np.ndarray]] = {}
     for code, frame in reference_frames.items():
         if frame.empty:
@@ -572,8 +587,16 @@ def _build_recovery_peer_index(
         result[code] = {
             "keys": fr["market_time_key"].to_numpy(),
             "mids": fr["mid_price"].to_numpy(dtype=float),
+            "bids": fr["BidPrice1"].to_numpy(dtype=float),
+            "asks": fr["AskPrice1"].to_numpy(dtype=float),
+            "tradable": fr["is_tradable_session"].fillna(False).to_numpy(dtype=bool) if "is_tradable_session" in fr.columns else np.ones(len(fr), dtype=bool),
+            "upper": fr.get("UpperLimitPrice", pd.Series([np.inf] * len(fr))).to_numpy(dtype=float),
+            "lower": fr.get("LowerLimitPrice", pd.Series([-np.inf] * len(fr))).to_numpy(dtype=float),
         }
     return result
+
+
+MAX_RECOVERY_PEER_AGE_MS = MAX_REFERENCE_AGE_SECONDS * 1000
 
 
 def _recovery_fair_price(
@@ -581,10 +604,12 @@ def _recovery_fair_price(
     peer_idx: dict[str, dict[str, np.ndarray]],
     peer_contracts: list[str],
     peer_bases: dict[str, float],
+    tick_size: float,
 ) -> float | None:
     """recovery_fair_price(u) = median_i(peer_i_mid_asof(u) + basis_i(anchor))。
 
     严格使用冻结的 basis_i(anchor)，不从未来帧重新估计。
+    peer asof 必须满足与检测阶段相同的新鲜度/交易时段/报价有效性/涨跌停校验。
     """
     fair_i_values: list[float] = []
     for code in peer_contracts:
@@ -595,10 +620,29 @@ def _recovery_fair_price(
         pos = int(np.searchsorted(keys, mk, side="right") - 1)
         if pos < 0:
             continue
-        peer_mid = float(pidx["mids"][pos])
-        if not np.isfinite(peer_mid) or peer_mid <= 0:
+        # 新鲜度校验（age <= 3s）
+        age_ms = mk - int(keys[pos])
+        if age_ms > MAX_RECOVERY_PEER_AGE_MS:
             continue
-        fair_i_values.append(peer_mid + peer_bases[code])
+        mid = float(pidx["mids"][pos])
+        bid = float(pidx["bids"][pos])
+        ask = float(pidx["asks"][pos])
+        # 交易时段校验
+        if not bool(pidx["tradable"][pos]):
+            continue
+        # 报价有效性
+        if bid <= 0 or ask <= 0 or ask < bid:
+            continue
+        if not np.isfinite(mid) or mid <= 0:
+            continue
+        # 涨跌停距离校验
+        ul = float(pidx["upper"][pos])
+        ll = float(pidx["lower"][pos])
+        if ul > 0 and mid >= ul - LIMIT_BUFFER_TICKS * tick_size:
+            continue
+        if ll > 0 and mid <= ll + LIMIT_BUFFER_TICKS * tick_size:
+            continue
+        fair_i_values.append(mid + peer_bases[code])
     if len(fair_i_values) < MIN_VALID_PEERS_RECOVERY:
         return None
     return float(np.median(fair_i_values))

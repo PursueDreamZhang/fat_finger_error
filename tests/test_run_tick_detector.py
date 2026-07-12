@@ -197,3 +197,52 @@ def test_run_detection_au_candidate_includes_chinese_fields(tmp_path):
         assert "触发原因" in events.columns
         assert "区间成交均价" in events.columns
         assert "回归标签" in events.columns
+
+
+AU_REAL_DATA_PATH = "data/tick2026/202605/20260520"
+
+
+def _au_real_data_available() -> bool:
+    from pathlib import Path
+
+    return (Path(AU_REAL_DATA_PATH) / "au2606_20260520.csv").exists()
+
+
+@pytest.mark.skipif(not _au_real_data_available(), reason="AU2606 真数据不可用")
+def test_slow_au2606_real_anchor_210435_hits_two_reasons_and_matches_design(tmp_path):
+    """设计文档 §10 标定锚点：AU2606 / 20260520 / 21:04:35.500。
+
+    慢测试（~7 分钟，需真数据）。常规套件用 pytest -k "not slow_" 跳过。
+    验收标准（implementation.md Task 6）：
+      - 两通道均命中（visible_execution_drop + interval_execution_drop）
+      - 合理价≈995.33、区间成交均价≈940.52、一秒合并均价≈962.18
+      - 回归标签=trade_recovered_3s
+      - 11:08:09.000 反例不命中
+    """
+    output_dir = tmp_path / "au-20260520"
+    run_detection(
+        tick_day_path=AU_REAL_DATA_PATH,
+        commodity="AU",
+        contract="AU2606",
+        output_dir=str(output_dir),
+    )
+    events = pd.read_csv(output_dir / "tick_candidate_events.csv")
+    assert len(events) > 0
+
+    # 锚点 21:04:35.500 必须存在且两通道命中
+    anchor = events[events["事件时间"] == "21:04:35.500"]
+    assert len(anchor) == 1
+    row = anchor.iloc[0]
+    assert "visible_execution_drop" in str(row["触发原因"])
+    assert "interval_execution_drop" in str(row["触发原因"])
+
+    # §10 标定值（容差见设计文档）
+    assert row["合理价"] == pytest.approx(995.33, abs=1.0)
+    assert row["区间成交均价"] == pytest.approx(940.52, abs=5.0)
+    assert row["一秒合并成交均价"] == pytest.approx(962.18, abs=5.0)
+    assert row["回归标签"] == "trade_recovered_3s"
+    assert row["可见末笔恢复确认秒数"] == pytest.approx(0.5, abs=0.6)
+    assert row["区间均价恢复确认秒数"] == pytest.approx(1.5, abs=0.6)
+
+    # 反例 11:08:09.000 不得命中
+    assert "11:08:09" not in events["事件时间"].astype(str).tolist()
