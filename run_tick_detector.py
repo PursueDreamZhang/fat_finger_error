@@ -19,6 +19,7 @@ from src.tick_detector.reference_selection import (
 )
 from src.tick_detector.report_html import render_event_replay_html
 from src.tick_detector.tick_io import (
+    COMMODITY_PROFILES,
     iter_day_contract_files,
     load_contract_snapshots,
     prepare_contract_snapshots,
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="聚合 Tick 乌龙指候选检测器")
     parser.add_argument("--tick-day-path", required=True, help="单日 tick 目录或 zip 路径")
     parser.add_argument("--commodity", required=False, help="可选，限制检测目标品种")
+    parser.add_argument("--commodities", required=False, help="可选，逗号分隔品种列表，如 AU,AG,CU")
     parser.add_argument("--contract", required=False, help="可选，限制检测目标合约")
     parser.add_argument("--output-dir", required=False, help="输出目录")
     return parser
@@ -84,22 +86,59 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.commodity and args.commodities:
+        parser.error("--commodity 不能与 --commodities 同时使用")
+    if args.commodities is not None and not [code.strip() for code in args.commodities.split(",") if code.strip()]:
+        parser.error("--commodities 不能为空或只包含逗号/空白")
+    if args.contract and args.commodities and len([code for code in args.commodities.split(",") if code.strip()]) > 1:
+        parser.error("--contract 不能与多个 --commodities 同时使用")
+    if args.contract and args.commodities:
+        selected = args.commodities.strip().upper()
+        if _commodity_from_contract(args.contract) != selected:
+            parser.error("--contract 必须属于 --commodities 指定的品种")
+    if args.contract and args.commodity and _commodity_from_contract(args.contract) != args.commodity.upper():
+        parser.error("--contract 必须属于 --commodity 指定的品种")
     if not args.output_dir:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = str(Path("output") / f"{timestamp}-tick-detector")
     return args
 
 
-def run_detection(*, tick_day_path: str, commodity: str | None, contract: str | None, output_dir: str) -> dict[str, str]:
+def run_detection(
+    *,
+    tick_day_path: str,
+    output_dir: str,
+    commodity: str | None = None,
+    contract: str | None = None,
+    commodities: str | None = None,
+) -> dict[str, object]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    target_commodity = commodity.upper() if commodity else _commodity_from_contract(contract)
+    if commodities:
+        target_commodities = [code.strip().upper() for code in commodities.split(",") if code.strip()]
+    elif commodity:
+        target_commodities = [commodity.upper()]
+    elif contract:
+        target_commodities = [_commodity_from_contract(contract)]
+    else:
+        target_commodities = None
     all_events: list[pd.DataFrame] = []
-    replay_payload: dict[str, dict[str, object]] = {}
-    contract_diagnostics: list[dict[str, object]] = []
     contract_filter = contract.upper() if contract else None
-    commodity_files = _group_contract_files_by_commodity(tick_day_path, target_commodity)
+    commodity_files = _group_contract_files_by_commodity(tick_day_path, target_commodities)
+    if target_commodities:
+        requested = set(target_commodities)
+        missing_data = sorted(requested - set(commodity_files))
+        missing_profiles = sorted(requested - set(COMMODITY_PROFILES))
+        unvalidated = sorted(
+            code for code in requested
+            if code in COMMODITY_PROFILES and COMMODITY_PROFILES[code].get("validation_status") != "validated"
+        )
+        if missing_data or missing_profiles or unvalidated:
+            raise ValueError(
+                f"请求品种不可运行：数据缺失={missing_data}，profile缺失={missing_profiles}，未审核={unvalidated}"
+            )
     commodity_items = list(commodity_files.items())
+    html_files: list[str] = []
 
     for commodity_index, (commodity_code, contract_files) in enumerate(commodity_items, start=1):
         print(
@@ -129,24 +168,42 @@ def run_detection(*, tick_day_path: str, commodity: str | None, contract: str | 
             f"  - {commodity_code} 有效合约 {len(day_frames)} 个，待检测目标 {len(commodity_targets)} 个",
             flush=True,
         )
+        commodity_events: list[pd.DataFrame] = []
+        commodity_payload: dict[str, dict[str, object]] = {}
+        commodity_diagnostics: list[dict[str, object]] = []
         for target_index, target_code in enumerate(commodity_targets, start=1):
             print(
                 f"    * 检测 {commodity_code} 目标 {target_index}/{len(commodity_targets)}：{target_code}",
                 flush=True,
             )
             events, diag = _detect_contract(target_code, day_frames)
-            contract_diagnostics.append(diag)
+            commodity_diagnostics.append(diag)
             if events is not None and not events.empty:
                 all_events.append(events)
-                _build_replay_payload(events, target_code, day_frames, replay_payload)
+                commodity_events.append(events)
+                _build_replay_payload(events, target_code, day_frames, commodity_payload)
+
+        commodity_events_df = _build_events_df(commodity_events)
+        html_path = output_path / f"event_replay_{commodity_code}.html"
+        html_path.write_text(
+            render_event_replay_html(commodity_events_df, commodity_payload, commodity_diagnostics),
+            encoding="utf-8",
+        )
+        html_files.append(str(html_path))
+        print(f"  - 写出 {html_path.name}", flush=True)
 
     events_df = _build_events_df(all_events)
     events_df_chinese = _map_to_chinese_csv(events_df)
     csv_path = output_path / "tick_candidate_events.csv"
-    html_path = output_path / "event_replay.html"
     events_df_chinese.to_csv(csv_path, index=False)
-    html_path.write_text(render_event_replay_html(events_df, replay_payload, contract_diagnostics), encoding="utf-8")
-    return {"tick_candidate_events_csv": str(csv_path), "event_replay_html": str(html_path)}
+    if len(html_files) == 1:
+        legacy_html_path = output_path / "event_replay.html"
+        legacy_html_path.write_text(Path(html_files[0]).read_text(encoding="utf-8"), encoding="utf-8")
+    return {
+        "tick_candidate_events_csv": str(csv_path),
+        "event_replay_htmls": html_files,
+        "event_replay_html": str(output_path / "event_replay.html") if len(html_files) == 1 else None,
+    }
 
 
 def _detect_contract(
@@ -411,14 +468,14 @@ def _build_peer_raw_windows(
 
 def _group_contract_files_by_commodity(
     tick_day_path: str,
-    target_commodity: str | None,
+    target_commodities: list[str] | None,
 ) -> dict[str, list]:
     grouped: dict[str, list] = {}
     for contract_file in iter_day_contract_files(tick_day_path):
         commodity_code = _commodity_from_file_name(contract_file.file_name)
         if commodity_code is None:
             continue
-        if target_commodity and commodity_code != target_commodity:
+        if target_commodities and commodity_code not in target_commodities:
             continue
         grouped.setdefault(commodity_code, []).append(contract_file)
     return dict(sorted(grouped.items()))
@@ -444,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     run_detection(
         tick_day_path=args.tick_day_path,
         commodity=args.commodity,
+        commodities=args.commodities,
         contract=args.contract,
         output_dir=args.output_dir,
     )

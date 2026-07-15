@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from src.tick_detector.tick_io import (
+    COMMODITY_PROFILES,
     MAX_CONFIRMATION_GAP_SECONDS,
     MAX_DATA_GAP_SECONDS,
     iter_day_contract_files,
@@ -149,10 +150,22 @@ def test_au_profile_marks_validated():
     assert df["contract_multiplier"].iloc[0] == 1000
 
 
-def test_non_au_commodity_marked_unvalidated():
-    raw = pd.DataFrame([_tick_row("jd2606", "09:01:30", 0)])
-    raw["commodity"] = "JD"
-    raw["contract"] = "JD2606"
+def test_experimental_profiles_cover_81_approved_commodities():
+    excluded = {"BB", "JR", "PM", "RI", "WH", "ZC"}
+
+    assert len(COMMODITY_PROFILES) == 81
+    assert excluded.isdisjoint(COMMODITY_PROFILES)
+    assert COMMODITY_PROFILES["CU"]["tick_size"] == 10
+    assert COMMODITY_PROFILES["CU"]["contract_multiplier"] == 5
+    assert COMMODITY_PROFILES["AG"]["tick_size"] == 1
+    assert COMMODITY_PROFILES["AG"]["contract_multiplier"] == 15
+    assert all(profile["validation_status"] == "validated" for profile in COMMODITY_PROFILES.values())
+
+
+def test_unconfigured_commodity_marked_unvalidated():
+    raw = pd.DataFrame([_tick_row("xx2606", "09:01:30", 0)])
+    raw["commodity"] = "XX"
+    raw["contract"] = "XX2606"
     raw["parse_status"] = "ok"
     raw["trade_date"] = "20260520"
     df = prepare_contract_snapshots(raw)
@@ -217,6 +230,21 @@ def test_same_market_time_key_rows_are_collapsed_before_diff():
     assert df["Volume"].iloc[0] == 120
     assert df["snapshot_seq_start"].iloc[0] == 0
     assert df["snapshot_seq_end"].iloc[0] == 2
+
+
+def test_single_row_after_collapsed_group_keeps_snapshot_sequence_range():
+    raw = _au_raw(
+        [
+            _tick_row("au2606", "09:01:30", 0, volume=100, turnover=10000000.0),
+            _tick_row("au2606", "09:01:30", 0, volume=101, turnover=10100000.0),
+            _tick_row("au2606", "09:01:31", 0, volume=102, turnover=10200000.0),
+        ]
+    )
+
+    df = prepare_contract_snapshots(raw)
+
+    assert df["snapshot_seq_start"].tolist() == [0, 2]
+    assert df["snapshot_seq_end"].tolist() == [1, 2]
 
 
 def test_diff_only_between_different_time_keys_after_collapse():

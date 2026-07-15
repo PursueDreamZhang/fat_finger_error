@@ -220,7 +220,7 @@ def test_fair_price_unreliable_when_uncertainty_exceeds_limit():
 def test_peer_with_abnormal_spread_excluded_from_fair_price():
     """peer 报价 spread 超过 baseline_spread_p95 + 1 tick 时不进 fair_price。
 
-    peer_b 的 spread 持续远大于正常（1 tick），应被排除。
+    peer_b 在当前时刻的 spread 远大于其自身历史正常范围，应被排除。
     """
     target_rows = []
     peer_a_rows = []
@@ -231,9 +231,9 @@ def test_peer_with_abnormal_spread_excluded_from_fair_price():
                                bid_price=99.98, ask_price=100.0))  # spread=1 tick
         peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}",
                                bid_price=99.98, ask_price=100.0))  # spread=1 tick
-        # peer_b spread=50 tick，远超正常
+        # 只有当前时刻 spread=50 tick，远超其自身正常的 1 tick
         peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}",
-                               bid_price=99.0, ask_price=100.0))  # spread=50 tick
+                               bid_price=99.0 if sec == 299 else 99.98, ask_price=100.0))
     target = _contract_frame("AU2606", "AU", target_rows)
     peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
     peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
@@ -244,6 +244,50 @@ def test_peer_with_abnormal_spread_excluded_from_fair_price():
     row = out.iloc[-1]
     # peer_b spread 异常 -> 只剩 peer_a 一个有效 peer -> 不可靠
     assert "AU2610" not in str(row["peer_contracts"])
+
+
+def test_peer_spread_uses_its_own_baseline_p95_not_target_p95():
+    """正常但天然较宽的 peer 不应因目标合约点差更窄而被误排除。"""
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    for sec in range(300):
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.98, ask_price=100.0))  # 1 tick
+        peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.98, ask_price=100.0))
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.0, ask_price=100.0))  # 自身稳定 50 tick
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02)
+    assert "AU2610" in str(out.iloc[-1]["peer_contracts"])
+
+
+def test_target_abnormal_spread_does_not_enter_basis_pairs():
+    """目标端异常宽价差必须从 basis 配对中排除。"""
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    # 20 个点恰好跨 60 秒；最后一个目标点宽价差，排除后只剩 19 个有效配对。
+    baseline_seconds = [round(i * 60 / 19) for i in range(20)]
+    for sec in baseline_seconds + [70]:
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}",
+                               bid_price=99.5 if sec == 60 else 99.98, ask_price=100.5 if sec == 60 else 100.0))
+        peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}"))
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02)
+    row = out.iloc[-1]
+    assert row["valid_peer_count"] == 0
+    assert row["fair_price_reliable"] is False or row["fair_price_reliable"] == False  # noqa: E712
 
 
 def test_basis_requires_at_least_60s_coverage():

@@ -35,6 +35,25 @@ def test_commodity_and_contract_only_affect_target_filters():
     assert args.contract == "AU2606"
 
 
+def test_commodities_accepts_multiple_codes_and_rejects_conflicts():
+    args = parse_args(
+        ["--tick-day-path", "data/tick2026/202605/20260520.zip", "--commodities", "AU,AG"]
+    )
+
+    assert args.commodities == "AU,AG"
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--tick-day-path", "data/tick2026/202605/20260520.zip",
+                "--commodity", "AU", "--commodities", "AG",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--tick-day-path", "data/tick2026/202605/20260520.zip", "--commodities", ",,"]
+        )
+
+
 _TICK_COLUMNS = [
     "TradingDay",
     "InstrumentID",
@@ -138,6 +157,23 @@ def test_run_detection_html_shows_diagnostics_for_zero_candidates(tmp_path):
     assert "合约运行诊断" in html
     assert "原始行数" in html
     assert "候选事件数" in html
+
+
+def test_run_detection_splits_html_per_commodity(tmp_path):
+    day_dir = tmp_path / "20260520"
+    day_dir.mkdir()
+    for code in ("au2606", "au2608", "au2610", "ag2606", "ag2608", "ag2610"):
+        _write_csv(day_dir / f"{code}_20260520.csv", [_tick_row(code, "09:01:30", 0)])
+
+    result = run_detection(
+        tick_day_path=str(day_dir),
+        commodities="AU,AG",
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert (tmp_path / "out" / "event_replay_AU.html").exists()
+    assert (tmp_path / "out" / "event_replay_AG.html").exists()
+    assert len(result["event_replay_htmls"]) == 2
 
 
 def test_run_detection_unvalidated_commodity_outputs_no_candidates(tmp_path):

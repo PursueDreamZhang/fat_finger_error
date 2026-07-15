@@ -79,11 +79,11 @@ def attach_fair_price_metrics(
     out["reference_blocked_reason"] = ""
 
     # 为每个 peer 预计算与 target 行对齐的 asof mid / spread / 有效性
-    target_mids = out["mid_price"].to_numpy(dtype=float)
     peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
 
     # Pass 1：逐行计算 fair_price
-    target_spread_ticks = target_df["spread_ticks"].to_numpy(dtype=float) if "spread_ticks" in target_df.columns else np.full(n, np.nan)
+    target_spread_ticks = out["spread_ticks"].to_numpy(dtype=float) if "spread_ticks" in out.columns else np.full(n, np.nan)
+    target_base_valid = _quote_base_valid(out, tick_size)
     for i in range(n):
         mk = int(keys[i])
         ws = mk - BASELINE_WINDOW_SECONDS * 1000
@@ -91,38 +91,50 @@ def attach_fair_price_metrics(
         lo = int(np.searchsorted(keys, ws, side="left"))
         hi = int(np.searchsorted(keys, we, side="right"))
 
-        # 目标基线 spread p95（设计文档 §5.1：spread_ticks <= p95 + 1）
-        baseline_spread_p95 = np.inf
-        if hi > lo:
-            window_spreads = target_spread_ticks[lo:hi]
-            valid_spreads = window_spreads[np.isfinite(window_spreads)]
-            if len(valid_spreads) >= BASELINE_MIN_PAIRS_PER_PEER:
-                baseline_spread_p95 = float(np.percentile(valid_spreads, 95))
-        spread_limit_ticks = baseline_spread_p95 + 1
+        # 目标与 peer 分别用各自基线的 spread p95 + 1 tick 判定报价有效。
+        target_window_valid = target_base_valid[lo:hi]
+        target_window_spreads = target_spread_ticks[lo:hi]
+        valid_target_spreads = target_window_spreads[target_window_valid & np.isfinite(target_window_spreads)]
+        if len(valid_target_spreads) < BASELINE_MIN_PAIRS_PER_PEER:
+            continue
+        target_spread_limit_ticks = float(np.percentile(valid_target_spreads, 95)) + 1
 
         fair_i_values: list[float] = []
         valid_peers: list[str] = []
         peer_bases: dict[str, float] = {}
 
         for code, pa in peer_aligned.items():
-            cur_mid = pa["asof_mid"][i]
-            if not np.isfinite(cur_mid) or cur_mid <= 0:
-                continue
-            if not pa["asof_base_valid"][i]:
-                continue
-            # spread <= p95 + 1 tick
-            cur_spread = pa["asof_spread_ticks"][i]
-            if not np.isfinite(cur_spread) or cur_spread > spread_limit_ticks:
-                continue
             if hi - lo < BASELINE_MIN_PAIRS_PER_PEER:
                 continue
             diffs = pa["diff"][lo:hi]
-            valid_mask = np.isfinite(diffs)
+            peer_window_valid = pa["asof_base_valid"][lo:hi]
+            peer_window_spreads = pa["asof_spread_ticks"][lo:hi]
+            valid_peer_spreads = peer_window_spreads[peer_window_valid & np.isfinite(peer_window_spreads)]
+            if len(valid_peer_spreads) < BASELINE_MIN_PAIRS_PER_PEER:
+                continue
+            peer_spread_limit_ticks = float(np.percentile(valid_peer_spreads, 95)) + 1
+            cur_mid = pa["asof_mid"][i]
+            cur_spread = pa["asof_spread_ticks"][i]
+            if (
+                not np.isfinite(cur_mid)
+                or cur_mid <= 0
+                or not pa["asof_base_valid"][i]
+                or not np.isfinite(cur_spread)
+                or cur_spread > peer_spread_limit_ticks
+            ):
+                continue
+            valid_mask = (
+                np.isfinite(diffs)
+                & target_window_valid
+                & (target_window_spreads <= target_spread_limit_ticks)
+                & peer_window_valid
+                & (peer_window_spreads <= peer_spread_limit_ticks)
+            )
             if valid_mask.sum() < BASELINE_MIN_PAIRS_PER_PEER:
                 continue
             # 基线覆盖时长 >= 60s（设计文档 §5.2）
             peer_keys_window = pa["asof_key"][lo:hi]
-            peer_keys_valid = peer_keys_window[np.isfinite(peer_keys_window)]
+            peer_keys_valid = peer_keys_window[valid_mask & np.isfinite(peer_keys_window)]
             if len(peer_keys_valid) < 2:
                 continue
             span_ms = int(peer_keys_valid.max()) - int(peer_keys_valid.min())
@@ -155,6 +167,26 @@ def attach_fair_price_metrics(
     # Pass 2：noise history，复用 Pass 1 的 fair_price(s)
     _attach_noise_history(out, tick_size)
     return out
+
+
+def _quote_base_valid(frame: pd.DataFrame, tick_size: float) -> np.ndarray:
+    """不含动态 spread 门槛的报价有效性，供目标基线配对复用。"""
+    bid = frame["BidPrice1"].to_numpy(dtype=float)
+    ask = frame["AskPrice1"].to_numpy(dtype=float)
+    mid = frame["mid_price"].to_numpy(dtype=float)
+    tradable = frame["is_tradable_session"].fillna(False).to_numpy(dtype=bool)
+    upper = frame.get("UpperLimitPrice", pd.Series([np.inf] * len(frame))).to_numpy(dtype=float)
+    lower = frame.get("LowerLimitPrice", pd.Series([-np.inf] * len(frame))).to_numpy(dtype=float)
+    return (
+        tradable
+        & (bid > 0)
+        & (ask > 0)
+        & (ask >= bid)
+        & np.isfinite(mid)
+        & (mid > 0)
+        & ~((upper > 0) & (mid >= upper - LIMIT_BUFFER_TICKS * tick_size))
+        & ~((lower > 0) & (mid <= lower + LIMIT_BUFFER_TICKS * tick_size))
+    )
 
 
 # ---------------------------------------------------------------------------

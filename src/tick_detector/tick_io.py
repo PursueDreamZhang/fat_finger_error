@@ -47,8 +47,9 @@ NIGHT_SESSION_END = "02:30:00"
 OPEN_GUARD_SECONDS = 60
 SESSION_OPENS = ("09:00:00", "10:30:00", "13:30:00", "21:00:00")
 
-# 品种元数据：tick_size / contract_multiplier / 参数档 / 验证状态
-# 第一版只有 AU validated；其他品种即使元数据齐全也只记 unvalidated_commodity。
+# 品种元数据：tick_size / contract_multiplier / 参数档 / 验证状态。
+# 20260520 自动推导并经本次全品种实验审核的 81 个品种可参与检测；
+# BB/JR/PM/RI/WH/ZC 因无有效成交样本暂不配置。
 COMMODITY_PROFILES: dict[str, dict[str, object]] = {
     "AU": {
         "tick_size": 0.02,
@@ -57,6 +58,102 @@ COMMODITY_PROFILES: dict[str, dict[str, object]] = {
         "validation_status": "validated",
     },
 }
+
+_EXPERIMENTAL_PROFILE_ROWS = """
+A 1 10
+AD 5 10
+AG 1 15
+AL 5 5
+AO 1 20
+AP 1 1
+B 1 10
+BC 10 5
+BR 5 5
+BU 1 10
+BZ 1 30
+C 1 10
+CF 5 1
+CJ 5 1
+CS 1 10
+CU 10 5
+CY 5 1
+EB 1 5
+EC 0.5 50
+EG 1 10
+FB 0.5 10
+FG 1 1
+FU 1 10
+HC 1 10
+I 0.5 100
+IC 0.2 200
+IF 0.2 300
+IH 0.2 300
+IM 0.2 200
+J 0.5 100
+JD 1 10
+JM 0.5 60
+L 1 5
+LC 20 1
+LG 0.5 90
+LH 5 16
+LU 1 10
+M 1 10
+MA 1 1
+NI 10 1
+NR 5 10
+OI 1 1
+OP 2 40
+P 1 10
+PB 5 5
+PD 0.05 1000
+PF 2 1
+PG 1 20
+PK 2 1
+PL 1 1
+PP 1 5
+PR 2 1
+PS 5 3
+PT 0.05 1000
+PX 2 1
+RB 1 10
+RM 1 1
+RR 1 10
+RS 1 1
+RU 5 10
+SA 1 1
+SC 0.1 1000
+SF 2 1
+SH 1 1
+SI 5 5
+SM 2 1
+SN 10 1
+SP 2 10
+SR 1 1
+SS 5 5
+T 0.005 10000
+TA 2 1
+TF 0.005 10000
+TL 0.01 10000
+TS 0.002 20000
+UR 1 1
+V 1 5
+WR 1 10
+Y 1 10
+ZN 5 5
+"""
+
+for _row in _EXPERIMENTAL_PROFILE_ROWS.splitlines():
+    if not _row:
+        continue
+    _code, _tick_size, _multiplier = _row.split()
+    COMMODITY_PROFILES[_code] = {
+        "tick_size": float(_tick_size),
+        "contract_multiplier": int(_multiplier),
+        "parameter_profile": "AUTO_INFERRED_V1",
+        "validation_status": "validated",
+        "parameter_source": "AUTO_INFERRED_20260520",
+        "review_status": "approved",
+    }
 
 
 @dataclass(frozen=True)
@@ -249,8 +346,12 @@ def _collapse_same_time_key(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(collapsed, ignore_index=True)
     if "snapshot_seq_start" not in out.columns:
         out["snapshot_seq_start"] = out["snapshot_seq"]
+    else:
+        out["snapshot_seq_start"] = out["snapshot_seq_start"].fillna(out["snapshot_seq"])
     if "snapshot_seq_end" not in out.columns:
         out["snapshot_seq_end"] = out["snapshot_seq"]
+    else:
+        out["snapshot_seq_end"] = out["snapshot_seq_end"].fillna(out["snapshot_seq"])
     return out
 
 
