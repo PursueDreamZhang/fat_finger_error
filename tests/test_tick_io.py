@@ -13,6 +13,7 @@ from src.tick_detector.tick_io import (
     MAX_DATA_GAP_SECONDS,
     iter_day_contract_files,
     load_contract_snapshots,
+    load_daily_bounds,
     prepare_contract_snapshots,
 )
 
@@ -48,6 +49,8 @@ def _tick_row(
     ask_price: float = 100.0,
     average_price: float = 100.0,
     turnover: float = 1000000.0,
+    upper_limit: float = 200.0,
+    lower_limit: float = 50.0,
 ) -> dict[str, object]:
     return {
         "TradingDay": trading_day,
@@ -63,8 +66,8 @@ def _tick_row(
         "AveragePrice": average_price,
         "Turnover": turnover,
         "OpenInterest": 100,
-        "UpperLimitPrice": 200.0,
-        "LowerLimitPrice": 50.0,
+        "UpperLimitPrice": upper_limit,
+        "LowerLimitPrice": lower_limit,
     }
 
 
@@ -78,6 +81,16 @@ def _au_raw(rows: list[dict[str, object]]) -> pd.DataFrame:
     df["contract"] = "AU2606"
     df["parse_status"] = "ok"
     df["trade_date"] = "20260520"
+    return df
+
+
+def _ap_raw(rows: list[dict[str, object]]) -> pd.DataFrame:
+    """AP：tick_size=1、contract_multiplier=1，均价=ΔTurnover/ΔVolume，便于复刻真实计数器毛刺。"""
+    df = pd.DataFrame(rows)
+    df["commodity"] = "AP"
+    df["contract"] = "AP610"
+    df["parse_status"] = "ok"
+    df["trade_date"] = "20260519"
     return df
 
 
@@ -389,6 +402,117 @@ def test_average_price_unit_check_only_not_counter_evidence():
 
 
 # ---------------------------------------------------------------------------
+# 成交额计数器守卫（累计 Turnover 回退 → 失效区间均价）
+# 复刻 AP610/20260519 13:36:30 真实毛刺：累计成交额秒内先回退再跳升，
+# 合并后 ΔTurnover 仍为正但严重偏小，算出离谱的 interval_vwap。
+# ---------------------------------------------------------------------------
+
+
+def test_interval_vwap_invalidated_when_cumulative_turnover_drops_within_frame():
+    raw = _ap_raw(
+        [
+            _tick_row("AP610", "09:01:30", 0, last_price=7394, volume=66658, turnover=493935780.0, average_price=7410.0, upper_limit=8069, lower_limit=6873),
+            _tick_row("AP610", "09:01:31", 0, last_price=7393, volume=66672, turnover=494039520.0, average_price=7410.0, upper_limit=8069, lower_limit=6873),
+            _tick_row("AP610", "09:01:32", 0, last_price=7393, volume=66679, turnover=494024711.0, average_price=7409.0, upper_limit=8069, lower_limit=6873),  # 累计成交额回退
+            _tick_row("AP610", "09:01:32", 0, last_price=7393, volume=66687, turnover=494083983.0, average_price=7409.0, upper_limit=8069, lower_limit=6873),
+        ]
+    )
+    df = prepare_contract_snapshots(raw)
+    by_time = dict(zip(df["display_time"], df["interval_vwap"]))
+    flag_by_time = dict(zip(df["display_time"], df["data_quality_flags"]))
+
+    # 干净帧均价正常（ΔV=14, ΔT=103740 -> 7410）
+    assert by_time["09:01:31.000"] == pytest.approx(7410.0, rel=1e-4)
+    # 累计成交额回退帧：ΔT 被失效，区间均价不产生
+    assert math.isnan(by_time["09:01:32.000"])
+    assert "turnover_counter_desync" in flag_by_time["09:01:32.000"]
+    # 干净帧不应被误标
+    assert "turnover_counter_desync" not in flag_by_time["09:01:31.000"]
+
+
+# ---------------------------------------------------------------------------
+# 价位带兜底（无日线时：区间均价必须落在涨跌停价内）
+# 真实成交（含接近涨停/跌停的尖刺）必在 [跌停, 涨停] 内；越界必为成交额污染。
+# ---------------------------------------------------------------------------
+
+
+def test_interval_vwap_invalidated_beyond_limit_band_but_near_limit_spike_kept():
+    # AP610：tick=1, multiplier=1, 涨跌停 [6873, 8069]
+    raw = _ap_raw(
+        [
+            _tick_row("AP610", "09:01:30", 0, last_price=7400, volume=1000, turnover=7400000.0, average_price=7400.0, upper_limit=8069, lower_limit=6873),
+            # 干净帧：vwap=7400，带内保留
+            _tick_row("AP610", "09:01:31", 0, last_price=7400, volume=1005, turnover=7437000.0, average_price=7400.0, upper_limit=8069, lower_limit=6873),
+            # 真实尖刺：ΔV=15, ΔT=120000 -> vwap=8000，接近涨停 8069 仍带内 -> 必须保留
+            _tick_row("AP610", "09:01:32", 0, last_price=7400, volume=1020, turnover=7557000.0, average_price=7408.82, upper_limit=8069, lower_limit=6873),
+            # 污染：ΔV=15, ΔT=135000 -> vwap=9000，突破涨停 8069 -> 失效
+            _tick_row("AP610", "09:01:33", 0, last_price=7400, volume=1035, turnover=7692000.0, average_price=7431.88, upper_limit=8069, lower_limit=6873),
+        ]
+    )
+    df = prepare_contract_snapshots(raw)
+    by_time = dict(zip(df["display_time"], df["interval_vwap"]))
+    flag_by_time = dict(zip(df["display_time"], df["data_quality_flags"]))
+
+    # 干净帧保留
+    assert by_time["09:01:31.000"] == pytest.approx(7400.0, rel=1e-4)
+    # 接近涨停的真实尖刺保留（涨跌停带不误杀贴近边界的真实成交）
+    assert by_time["09:01:32.000"] == pytest.approx(8000.0, rel=1e-4)
+    assert "vwap_beyond_limit" not in flag_by_time["09:01:32.000"]
+    # 突破涨跌停的均价失效
+    assert math.isnan(by_time["09:01:33.000"])
+    assert "vwap_beyond_limit" in flag_by_time["09:01:33.000"]
+
+
+# ---------------------------------------------------------------------------
+# 价位带兜底（有日线时：日线 [Low,High]±容差，比涨跌停带更紧，抓中度污染）
+# ---------------------------------------------------------------------------
+
+
+def _ap610_rows():
+    """AP610：tick=1, multiplier=1, 涨跌停 [6873,8069]。vwap 依次 7400 / 7500 / 7457。"""
+    return _ap_raw(
+        [
+            _tick_row("AP610", "09:01:30", 0, last_price=7400, volume=1000, turnover=7400000.0, average_price=7400.0, upper_limit=8069, lower_limit=6873),
+            # 干净：vwap=7400（日线[7356,7455]内）
+            _tick_row("AP610", "09:01:31", 0, last_price=7400, volume=1005, turnover=7437000.0, average_price=7400.0, upper_limit=8069, lower_limit=6873),
+            # 中度污染：vwap=7500（在涨跌停内、但超日线high 7455+3容差=7458）-> 日线抓、涨跌停漏
+            _tick_row("AP610", "09:01:32", 0, last_price=7400, volume=1020, turnover=7549500.0, average_price=7401.47, upper_limit=8069, lower_limit=6873),
+            # 容差边界：vwap=7457（超日线high 7455 仅 2 跳，≤3 容差）-> 放行
+            _tick_row("AP610", "09:01:33", 0, last_price=7400, volume=1035, turnover=7661355.0, average_price=7402.28, upper_limit=8069, lower_limit=6873),
+        ]
+    )
+
+
+def test_daily_bound_catches_within_limit_corruption_and_respects_tolerance():
+    # 日线 AP2610 [7356,7455], pre_settle=7471（=涨跌停中点，同日校验通过）
+    daily_bounds = {"AP2610": (7356.0, 7455.0, 7471.0)}
+    df = prepare_contract_snapshots(_ap610_rows(), daily_bounds=daily_bounds)
+    by_time = dict(zip(df["display_time"], df["interval_vwap"]))
+    flag_by_time = dict(zip(df["display_time"], df["data_quality_flags"]))
+
+    # 干净帧保留
+    assert by_time["09:01:31.000"] == pytest.approx(7400.0, rel=1e-4)
+    # 中度污染（涨跌停内、日线外）被日线边界失效
+    assert math.isnan(by_time["09:01:32.000"])
+    assert "vwap_beyond_daily" in flag_by_time["09:01:32.000"]
+    # 容差内（超日线high仅2跳）放行
+    assert by_time["09:01:33.000"] == pytest.approx(7457.0, rel=1e-4)
+    assert "vwap_beyond_daily" not in flag_by_time["09:01:33.000"]
+
+
+def test_daily_bound_falls_back_to_limit_when_sameday_check_fails():
+    # pre_settle=9999 与涨跌停中点 7471 不符 -> 同日校验失败 -> 退回涨跌停带
+    daily_bounds = {"AP2610": (7356.0, 7455.0, 9999.0)}
+    df = prepare_contract_snapshots(_ap610_rows(), daily_bounds=daily_bounds)
+    by_time = dict(zip(df["display_time"], df["interval_vwap"]))
+    flag_by_time = dict(zip(df["display_time"], df["data_quality_flags"]))
+
+    # 7500 在涨跌停 [6873,8069] 内 -> 回退后不再失效（日线边界未被采用）
+    assert by_time["09:01:32.000"] == pytest.approx(7500.0, rel=1e-4)
+    assert "vwap_beyond_daily" not in flag_by_time["09:01:32.000"]
+
+
+# ---------------------------------------------------------------------------
 # session_state / data_quality_flags
 # ---------------------------------------------------------------------------
 
@@ -448,3 +572,34 @@ def test_data_quality_flags_column_present():
     raw = _au_raw([_tick_row("au2606", "09:01:30", 0)])
     df = prepare_contract_snapshots(raw)
     assert "data_quality_flags" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# load_daily_bounds：日线 parquet → 归一化 {合约: (low,high,pre_settle)}
+# ---------------------------------------------------------------------------
+
+
+def _write_daily_parquet(path, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    cols = ["code", "date", "pre_close", "pre_settle", "open", "high", "low", "close", "settle", "vol"]
+    pd.DataFrame(rows, columns=cols).to_parquet(path)
+
+
+def test_load_daily_bounds_builds_normalized_map(tmp_path):
+    _write_daily_parquet(
+        tmp_path / "2026" / "20260519.parquet",
+        [
+            {"code": "AP2610.CZCE", "date": 20260519, "pre_close": 7471, "pre_settle": 7471, "open": 7400, "high": 7455, "low": 7356, "close": 7400, "settle": 7400, "vol": 100},
+            {"code": "au2606.SHFE", "date": 20260519, "pre_close": 1000, "pre_settle": 1000, "open": 1000, "high": 1006, "low": 995, "close": 1000, "settle": 1000, "vol": 100},
+            {"code": "AP.CZCE", "date": 20260519, "pre_close": 7471, "pre_settle": 7471, "open": 0, "high": 0, "low": 0, "close": 0, "settle": 7471, "vol": 0},  # 连续合约+空柱 -> 排除
+        ],
+    )
+    m = load_daily_bounds("20260519", daily_root=str(tmp_path))
+    assert m == {
+        "AP2610": (7356.0, 7455.0, 7471.0),
+        "AU2606": (995.0, 1006.0, 1000.0),
+    }
+
+
+def test_load_daily_bounds_returns_none_when_file_missing(tmp_path):
+    assert load_daily_bounds("20260101", daily_root=str(tmp_path)) is None

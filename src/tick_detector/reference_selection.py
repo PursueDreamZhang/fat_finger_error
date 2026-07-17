@@ -58,14 +58,7 @@ def attach_fair_price_metrics(
     n = len(out)
     keys = out["market_time_key"].to_numpy()
 
-    # 初始化输出列
-    out["fair_price"] = np.nan
-    out["fair_uncertainty_ticks"] = np.nan
-    out["fair_price_reliable"] = False
-    out["valid_peer_count"] = 0
-    out["peer_contracts"] = ""
-    out["__valid_peer_contracts"] = [list() for _ in range(n)]
-    out["__peer_bases"] = [dict() for _ in range(n)]
+    # 初始化 Pass 2 输出列（由 _attach_noise_history 整列覆写）
     out["last_threshold_ticks"] = np.nan
     out["vwap_threshold_ticks"] = np.nan
     out["noise_sample_count"] = 0
@@ -76,10 +69,22 @@ def attach_fair_price_metrics(
     out["last_noise_robust_sigma"] = np.nan
     out["vwap_noise_robust_sigma"] = np.nan
     out["execution_depth_robust_sigma"] = np.nan
-    out["reference_blocked_reason"] = ""
 
     # 为每个 peer 预计算与 target 行对齐的 asof mid / spread / 有效性
     peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
+
+    # Pass 1 输出预分配：循环内只写数组，结束后一次性写回 DataFrame。
+    # valid_peer_contracts_col / peer_bases_col 保留逐行 list/dict 的对象语义。
+    fair_prices = np.full(n, np.nan)
+    fair_uncertainties = np.full(n, np.nan)
+    fair_reliable = np.zeros(n, dtype=bool)
+    valid_peer_counts = np.zeros(n, dtype=np.int64)
+    peer_contracts_arr = np.empty(n, dtype=object)
+    peer_contracts_arr[:] = ""
+    valid_peer_contracts_col: list[list[str]] = [[] for _ in range(n)]
+    peer_bases_col: list[dict[str, float]] = [{} for _ in range(n)]
+    pass1_blocked = np.empty(n, dtype=object)
+    pass1_blocked[:] = ""
 
     # Pass 1：逐行计算 fair_price
     target_spread_ticks = out["spread_ticks"].to_numpy(dtype=float) if "spread_ticks" in out.columns else np.full(n, np.nan)
@@ -145,27 +150,37 @@ def attach_fair_price_metrics(
             fair_i_values.append(cur_mid + basis)
             valid_peers.append(code)
 
-        out.at[i, "valid_peer_count"] = len(valid_peers)
-        out.at[i, "peer_contracts"] = ",".join(valid_peers)
-        out.at[i, "__valid_peer_contracts"] = valid_peers
-        out.at[i, "__peer_bases"] = peer_bases
+        valid_peer_counts[i] = len(valid_peers)
+        peer_contracts_arr[i] = ",".join(valid_peers)
+        valid_peer_contracts_col[i] = valid_peers
+        peer_bases_col[i] = peer_bases
 
         if len(valid_peers) < MIN_VALID_PEERS:
-            out.at[i, "reference_blocked_reason"] = "insufficient_peers"
+            pass1_blocked[i] = "insufficient_peers"
             continue
 
         fair_arr = np.array(fair_i_values, dtype=float)
         fair_price = float(np.median(fair_arr))
         uncertainty = _mad_sigma(fair_arr) / tick_size
-        out.at[i, "fair_price"] = fair_price
-        out.at[i, "fair_uncertainty_ticks"] = uncertainty
+        fair_prices[i] = fair_price
+        fair_uncertainties[i] = uncertainty
         reliable = uncertainty <= FAIR_UNCERTAINTY_LIMIT_TICKS
-        out.at[i, "fair_price_reliable"] = reliable
+        fair_reliable[i] = reliable
         if not reliable:
-            out.at[i, "reference_blocked_reason"] = "fair_uncertainty_exceeded"
+            pass1_blocked[i] = "fair_uncertainty_exceeded"
+
+    # Pass 1 输出一次性写回 DataFrame
+    out["fair_price"] = fair_prices
+    out["fair_uncertainty_ticks"] = fair_uncertainties
+    out["fair_price_reliable"] = fair_reliable
+    out["valid_peer_count"] = valid_peer_counts
+    out["peer_contracts"] = peer_contracts_arr
+    out["__valid_peer_contracts"] = valid_peer_contracts_col
+    out["__peer_bases"] = peer_bases_col
+    out["reference_blocked_reason"] = pass1_blocked
 
     # Pass 2：noise history，复用 Pass 1 的 fair_price(s)
-    _attach_noise_history(out, tick_size)
+    _attach_noise_history(out, tick_size, pass1_blocked)
     return out
 
 
@@ -222,36 +237,35 @@ def _build_peer_aligned(
         p_upper = fr.get("UpperLimitPrice", pd.Series([np.inf] * len(fr))).to_numpy(dtype=float)
         p_lower = fr.get("LowerLimitPrice", pd.Series([-np.inf] * len(fr))).to_numpy(dtype=float)
 
-        asof_mid = np.full(len(keys), np.nan)
-        asof_spread_ticks = np.full(len(keys), np.nan)
-        asof_key = np.full(len(keys), np.nan)
-        asof_base_valid = np.zeros(len(keys), dtype=bool)
-        for i, mk in enumerate(keys):
-            pos = int(np.searchsorted(p_keys, mk, side="right") - 1)
-            if pos < 0:
-                continue
-            age_ms = mk - int(p_keys[pos])
-            if age_ms > MAX_REFERENCE_AGE_SECONDS * 1000:
-                continue
-            mid = p_mids[pos]
-            bid = p_bids[pos]
-            ask = p_asks[pos]
-            if not p_tradable[pos]:
-                continue
-            if bid <= 0 or ask <= 0 or ask < bid:
-                continue
-            if not np.isfinite(mid) or mid <= 0:
-                continue
-            ul = p_upper[pos]
-            ll = p_lower[pos]
-            if ul > 0 and mid >= ul - LIMIT_BUFFER_TICKS * tick_size:
-                continue
-            if ll > 0 and mid <= ll + LIMIT_BUFFER_TICKS * tick_size:
-                continue
-            asof_mid[i] = mid
-            asof_spread_ticks[i] = (ask - bid) / tick_size
-            asof_key[i] = int(p_keys[pos])
-            asof_base_valid[i] = True
+        positions = np.searchsorted(p_keys, keys, side="right") - 1
+        has_position = positions >= 0
+        safe_positions = np.clip(positions, 0, len(p_keys) - 1)
+        matched_keys = p_keys[safe_positions]
+        matched_mids = p_mids[safe_positions]
+        matched_bids = p_bids[safe_positions]
+        matched_asks = p_asks[safe_positions]
+        matched_upper = p_upper[safe_positions]
+        matched_lower = p_lower[safe_positions]
+        age_ms = keys.astype(np.int64) - matched_keys.astype(np.int64)
+        asof_base_valid = (
+            has_position
+            & (age_ms <= MAX_REFERENCE_AGE_SECONDS * 1000)
+            & p_tradable[safe_positions]
+            & (matched_bids > 0)
+            & (matched_asks > 0)
+            & (matched_asks >= matched_bids)
+            & np.isfinite(matched_mids)
+            & (matched_mids > 0)
+            & ~((matched_upper > 0) & (matched_mids >= matched_upper - LIMIT_BUFFER_TICKS * tick_size))
+            & ~((matched_lower > 0) & (matched_mids <= matched_lower + LIMIT_BUFFER_TICKS * tick_size))
+        )
+        asof_mid = np.where(asof_base_valid, matched_mids, np.nan)
+        asof_spread_ticks = np.where(
+            asof_base_valid,
+            (matched_asks - matched_bids) / tick_size,
+            np.nan,
+        )
+        asof_key = np.where(asof_base_valid, matched_keys.astype(float), np.nan)
 
         diff = target_mids - asof_mid
         result[code] = {
@@ -269,8 +283,12 @@ def _build_peer_aligned(
 # ---------------------------------------------------------------------------
 
 
-def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
-    """每个目标行 t 用 [t-300s, t-10s] 窗口的已算 fair_price(s) 生成噪声与阈值。"""
+def _attach_noise_history(out: pd.DataFrame, tick_size: float, blocked_reasons: np.ndarray) -> None:
+    """每个目标行 t 用 [t-300s, t-10s] 窗口的已算 fair_price(s) 生成噪声与阈值。
+
+    blocked_reasons 为 Pass 1 已填入的对象数组（引用语义），本函数就地补写
+    insufficient_noise_history，结束后整列写回 DataFrame。
+    """
     keys = out["market_time_key"].to_numpy()
     n = len(out)
     target_mids = out["mid_price"].to_numpy(dtype=float)
@@ -279,6 +297,16 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
     target_dv = out["delta_volume"].to_numpy(dtype=float)
     fair_prices = out["fair_price"].to_numpy(dtype=float)
     fair_reliable = out["fair_price_reliable"].to_numpy(dtype=bool)
+    noise_sample_counts = np.zeros(n, dtype=int)
+    noise_spans = np.zeros(n, dtype=float)
+    noise_history_reliable = np.zeros(n, dtype=bool)
+    last_noise_medians = np.full(n, np.nan)
+    vwap_noise_medians = np.full(n, np.nan)
+    last_noise_sigmas = np.full(n, np.nan)
+    vwap_noise_sigmas = np.full(n, np.nan)
+    depth_noise_sigmas = np.full(n, np.nan)
+    last_thresholds = np.full(n, np.nan)
+    vwap_thresholds = np.full(n, np.nan)
 
     for i in range(n):
         mk = int(keys[i])
@@ -287,66 +315,69 @@ def _attach_noise_history(out: pd.DataFrame, tick_size: float) -> None:
         lo = int(np.searchsorted(keys, ws, side="left"))
         hi = int(np.searchsorted(keys, we, side="right"))
         if lo >= hi:
-            if not out.at[i, "reference_blocked_reason"]:
-                out.at[i, "reference_blocked_reason"] = "insufficient_noise_history"
+            if not blocked_reasons[i]:
+                blocked_reasons[i] = "insufficient_noise_history"
             continue
 
-        last_noise: list[float] = []
-        vwap_noise: list[float] = []
-        depth_noise: list[float] = []  # 逐点 max(last, vwap)
-        for s in range(lo, hi):
-            if not (np.isfinite(target_dv[s]) and target_dv[s] > 0):
-                continue
-            if not fair_reliable[s]:
-                continue
-            fp = fair_prices[s]
-            if not np.isfinite(fp) or fp <= 0:
-                continue
-            last = target_last[s]
-            vwap = target_vwap[s]
-            ln = (fp - last) / tick_size if np.isfinite(last) and last > 0 else None
-            vn = (fp - vwap) / tick_size if np.isfinite(vwap) and vwap > 0 else None
-            # 设计文档 §6.1: execution_depth_noise(s) = max(last_noise(s), vwap_noise(s))
-            candidates = [v for v in (ln, vn) if v is not None]
-            if ln is not None:
-                last_noise.append(ln)
-            if vn is not None:
-                vwap_noise.append(vn)
-            # 逐点 max 仅在该点两通道都有值时取 max；否则取存在的那个
-            if candidates:
-                depth_noise.append(max(candidates))
+        window_dv = target_dv[lo:hi]
+        window_fp = fair_prices[lo:hi]
+        valid_base = (
+            np.isfinite(window_dv)
+            & (window_dv > 0)
+            & fair_reliable[lo:hi]
+            & np.isfinite(window_fp)
+            & (window_fp > 0)
+        )
+        window_last = target_last[lo:hi]
+        window_vwap = target_vwap[lo:hi]
+        valid_last = valid_base & np.isfinite(window_last) & (window_last > 0)
+        valid_vwap = valid_base & np.isfinite(window_vwap) & (window_vwap > 0)
+        last_noise = (window_fp[valid_last] - window_last[valid_last]) / tick_size
+        vwap_noise = (window_fp[valid_vwap] - window_vwap[valid_vwap]) / tick_size
+        depth_valid = valid_last | valid_vwap
+        last_depth = np.where(valid_last, (window_fp - window_last) / tick_size, -np.inf)
+        vwap_depth = np.where(valid_vwap, (window_fp - window_vwap) / tick_size, -np.inf)
+        depth_noise = np.maximum(last_depth, vwap_depth)[depth_valid]
 
-        span = (int(keys[hi - 1]) - int(keys[lo])) / 1000.0 if hi > lo else 0.0
-        out.at[i, "noise_sample_count"] = len(last_noise)
-        out.at[i, "noise_time_span_seconds"] = span
+        span = (int(keys[hi - 1]) - int(keys[lo])) / 1000.0
+        noise_sample_counts[i] = len(last_noise)
+        noise_spans[i] = span
         reliable = len(last_noise) >= NOISE_MIN_SAMPLE_COUNT and span >= NOISE_MIN_SPAN_SECONDS
-        out.at[i, "noise_history_reliable"] = reliable
+        noise_history_reliable[i] = reliable
         if not reliable:
-            if not out.at[i, "reference_blocked_reason"]:
-                out.at[i, "reference_blocked_reason"] = "insufficient_noise_history"
+            if not blocked_reasons[i]:
+                blocked_reasons[i] = "insufficient_noise_history"
             continue
 
-        last_arr = np.array(last_noise, dtype=float)
-        vwap_arr = np.array(vwap_noise, dtype=float)
-
-        last_med = float(np.median(last_arr)) if len(last_arr) else 0.0
-        vwap_med = float(np.median(vwap_arr)) if len(vwap_arr) else 0.0
-        last_sigma = _mad_sigma(last_arr) if len(last_arr) else 0.0
-        vwap_sigma = _mad_sigma(vwap_arr) if len(vwap_arr) else 0.0
+        last_med = float(np.median(last_noise)) if len(last_noise) else 0.0
+        vwap_med = float(np.median(vwap_noise)) if len(vwap_noise) else 0.0
+        last_sigma = _mad_sigma(last_noise) if len(last_noise) else 0.0
+        vwap_sigma = _mad_sigma(vwap_noise) if len(vwap_noise) else 0.0
         # 设计文档 §6.1: execution_depth_robust_sigma = 1.4826 * MAD(max(last_noise, vwap_noise))
-        depth_arr = np.array(depth_noise, dtype=float)
-        depth_sigma = _mad_sigma(depth_arr) if len(depth_arr) else 0.0
+        depth_sigma = _mad_sigma(depth_noise) if len(depth_noise) else 0.0
 
-        out.at[i, "last_noise_median"] = last_med
-        out.at[i, "vwap_noise_median"] = vwap_med
-        out.at[i, "last_noise_robust_sigma"] = last_sigma
-        out.at[i, "vwap_noise_robust_sigma"] = vwap_sigma
-        out.at[i, "execution_depth_robust_sigma"] = depth_sigma
+        last_noise_medians[i] = last_med
+        vwap_noise_medians[i] = vwap_med
+        last_noise_sigmas[i] = last_sigma
+        vwap_noise_sigmas[i] = vwap_sigma
+        depth_noise_sigmas[i] = depth_sigma
 
         fp_t = fair_prices[i]
         min_depth_ticks = fp_t * MIN_DEPTH_BPS / 10000 / tick_size if np.isfinite(fp_t) and fp_t > 0 else 0.0
-        out.at[i, "last_threshold_ticks"] = max(MIN_LAST_TICKS, min_depth_ticks, last_med + NOISE_K * last_sigma)
-        out.at[i, "vwap_threshold_ticks"] = max(MIN_VWAP_TICKS, min_depth_ticks, vwap_med + NOISE_K * vwap_sigma)
+        last_thresholds[i] = max(MIN_LAST_TICKS, min_depth_ticks, last_med + NOISE_K * last_sigma)
+        vwap_thresholds[i] = max(MIN_VWAP_TICKS, min_depth_ticks, vwap_med + NOISE_K * vwap_sigma)
+
+    out["noise_sample_count"] = noise_sample_counts
+    out["noise_time_span_seconds"] = noise_spans
+    out["noise_history_reliable"] = noise_history_reliable
+    out["last_noise_median"] = last_noise_medians
+    out["vwap_noise_median"] = vwap_noise_medians
+    out["last_noise_robust_sigma"] = last_noise_sigmas
+    out["vwap_noise_robust_sigma"] = vwap_noise_sigmas
+    out["execution_depth_robust_sigma"] = depth_noise_sigmas
+    out["last_threshold_ticks"] = last_thresholds
+    out["vwap_threshold_ticks"] = vwap_thresholds
+    out["reference_blocked_reason"] = blocked_reasons
 
 
 def _mad_sigma(arr: np.ndarray) -> float:

@@ -49,7 +49,7 @@ TARGET_DETAIL_COLUMNS = [
     ("__is_candidate_anchor", "是否候选锚点"),
 ]
 
-# 参考合约原始快照表中文表头（只允许原始行情字段）
+# 参考合约原始快照表中文表头（原始行情 + 区间派生字段）
 PEER_RAW_COLUMNS = [
     ("display_trade_date", "交易日"),
     ("contract", "合约代码"),
@@ -65,6 +65,9 @@ PEER_RAW_COLUMNS = [
     ("OpenInterest", "持仓量"),
     ("UpperLimitPrice", "涨停价"),
     ("LowerLimitPrice", "跌停价"),
+    ("delta_volume", "区间增量成交量"),
+    ("delta_turnover", "区间增量成交额"),
+    ("interval_vwap", "区间成交均价"),
 ]
 
 # 合约运行诊断表中文表头
@@ -184,7 +187,7 @@ def _render_event_section(event: dict[str, object], payload: dict[str, object]) 
         f"<h2>{title}</h2>"
         f"<div class='cards'>{''.join(_render_card(l, v) for l, v in summary_cards)}</div>"
         f"<h3>目标合约检测明细</h3>"
-        f"<p class='section-note'>窗口为锚点前 60 秒至后 10 秒。红色行为候选锚点。</p>"
+        f"<p class='section-note'>窗口为锚点前 10 秒至后 10 秒。红色行为候选锚点。</p>"
         f"{detail_table}"
         f"<h3>参考合约原始快照</h3>"
         f"<p class='section-note'>每个参与合理价计算的参考合约在同一窗口的原始行情。</p>"

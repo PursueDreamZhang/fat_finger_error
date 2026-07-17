@@ -8,6 +8,7 @@ import pytest
 
 from src.tick_detector.reference_selection import (
     FAIR_UNCERTAINTY_LIMIT_TICKS,
+    _build_peer_aligned,
     attach_fair_price_metrics,
     select_reference_contracts,
 )
@@ -95,6 +96,32 @@ def test_select_reference_contracts_picks_top5_by_daily_volume_excluding_target_
         target_contract="AU2606",
     )
     assert refs == ["AU2608", "AU2610"]
+
+
+def test_build_peer_aligned_preserves_asof_boundaries_and_quote_validation():
+    target = _contract_frame(
+        "AU2606",
+        "AU",
+        [_mk("AU2606", key) for key in (500, 1000, 4000, 4001, 5000)],
+    )
+    peer = _contract_frame(
+        "AU2608",
+        "AU",
+        [
+            _mk("AU2608", 1000, mid_price=101.0, bid_price=100.98, ask_price=101.0),
+            _mk("AU2608", 5000, mid_price=102.0, bid_price=0.0, ask_price=102.0),
+        ],
+    )
+
+    aligned = _build_peer_aligned(target, {"AU2608": peer}, tick_size=0.02)["AU2608"]
+
+    assert np.isnan(aligned["asof_mid"][0])
+    assert aligned["asof_mid"][1] == pytest.approx(101.0)
+    assert aligned["asof_key"][1] == pytest.approx(1000.0)
+    assert aligned["asof_mid"][2] == pytest.approx(101.0)
+    assert np.isnan(aligned["asof_mid"][3])
+    assert np.isnan(aligned["asof_mid"][4])
+    assert aligned["asof_base_valid"].tolist() == [False, True, True, False, False]
 
 
 # ---------------------------------------------------------------------------
@@ -382,3 +409,79 @@ def test_frozen_basis_does_not_change_when_peer_set_changes_after_anchor():
     # 所有值有限
     for v in anchor_bases.values():
         assert pd.notna(v)
+
+
+# ---------------------------------------------------------------------------
+# Pass 1 输出写入语义（阶段 4）：预分配数组 + 一次性写回
+# ---------------------------------------------------------------------------
+
+
+def test_pass1_object_columns_preserve_empty_list_and_empty_dict_types():
+    """Pass 1 预分配 list/dict 对象列后，无有效 peer 行的 __valid_peer_contracts 必须是
+    list、__peer_bases 必须是 dict，且 peer_contracts 是空串而非 NaN。"""
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    # 前 5 行不足以建立基线（窗口缺数据），会落到 insufficient_peers 分支
+    for sec in range(5):
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}"))
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(
+        target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02
+    )
+
+    early = out.iloc[0]
+    assert isinstance(early["__valid_peer_contracts"], list)
+    assert early["__valid_peer_contracts"] == []
+    assert isinstance(early["__peer_bases"], dict)
+    assert early["__peer_bases"] == {}
+    # peer_contracts 是字符串列，无有效 peer 行为空串而非 NaN
+    assert early["peer_contracts"] == ""
+    assert early["valid_peer_count"] == 0
+    # blocked reason 必须是有限字符串（具体取 insufficient_peers / insufficient_noise_history
+    # 由窗口样本量决定，这里只校验非空、非 NaN、是 str）
+    assert isinstance(early["reference_blocked_reason"], str)
+    assert early["reference_blocked_reason"] != ""
+
+
+def test_pass1_reference_blocked_reason_column_is_python_str():
+    """reference_blocked_reason 整列写回后元素必须是 Python str，不能混入 NaN/float。"""
+    target_rows = []
+    peer_a_rows = []
+    peer_b_rows = []
+    for sec in range(5):
+        mk = sec * 1000
+        target_rows.append(_mk("AU2606", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_a_rows.append(_mk("AU2608", mk, mid_price=100.0, display_time=f"t{sec}"))
+        peer_b_rows.append(_mk("AU2610", mk, mid_price=100.0, display_time=f"t{sec}"))
+    target = _contract_frame("AU2606", "AU", target_rows)
+    peer_a = _contract_frame("AU2608", "AU", peer_a_rows)
+    peer_b = _contract_frame("AU2610", "AU", peer_b_rows)
+
+    out = attach_fair_price_metrics(
+        target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02
+    )
+
+    reasons = out["reference_blocked_reason"].tolist()
+    assert all(isinstance(value, str) for value in reasons)
+    # 无 blocked 的行（早期帧也缺噪声历史）至少不应出现 NaN
+    assert all(pd.notna(value) for value in reasons)
+
+
+def test_pass1_preserves_peer_order_in_peer_contracts():
+    """peer_contracts 必须按 reference_frames 遍历顺序（并受 select_reference_contracts
+    成交量排序）保留，阶段 4 写回不得颠倒。"""
+    target, peer_a, peer_b = _two_peers_stable(rows=250)
+    out = attach_fair_price_metrics(
+        target, {"AU2608": peer_a, "AU2610": peer_b}, tick_size=0.02
+    )
+    reliable_row = out[out["fair_price_reliable"] == True].iloc[0]  # noqa: E712
+    contracts = reliable_row["peer_contracts"]
+    assert contracts == "AU2608,AU2610"
+    assert reliable_row["__valid_peer_contracts"] == ["AU2608", "AU2610"]

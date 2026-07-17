@@ -34,6 +34,11 @@ TICK_COLUMNS = [
 MAX_DATA_GAP_SECONDS = 3
 # 1 秒均价确认窗的采样完整性条件：比数据断点更严格。
 MAX_CONFIRMATION_GAP_SECONDS = 1
+# 日线 [Low,High] 边界容差（tick 数）：日线极值本身是取整/近似值，真实 VWAP 可能卡在
+# 边界外一两跳，放 N 跳容差避免误伤 sub-tick 边界帧（仍远小于真污染的偏离）。
+DAILY_VWAP_TOLERANCE_TICKS = 3
+# 同日校验：tick 涨跌停中点 ≈ 日线 pre_settle 的最大允许相对差（防日线属于别的交易日）。
+DAILY_SAMEDAY_TOLERANCE = 0.005
 
 # 日盘交易时段（开始时间, 结束时间）
 DAY_SESSION_RANGES = (
@@ -210,6 +215,50 @@ def parse_contract_file(file_name: str, instrument_id: str | None) -> ContractIn
     return ContractInfo(commodity, contract, "ok", trade_date)
 
 
+def normalize_contract_code(code: str) -> str:
+    """归一化合约码用于 tick↔日线对齐：大写；郑商所 3 位月份补成 4 位（2020s）。
+
+    tick 用 `AP610`（3 位）、日线用 `AP2610`（4 位）；大小写也有差异（`au2606` vs `AU2606`）。
+    非郑商所品种天然 4 位，不受影响。连续合约（无月份）原样返回。
+    """
+    s = str(code).upper()
+    m = CONTRACT_RE.match(s)
+    if not m:
+        return s
+    letters, digits = m.group(1), m.group(2)
+    if len(digits) == 3:
+        digits = "2" + digits
+    return letters + digits
+
+
+def load_daily_bounds(
+    trade_date: str, daily_root: str = "data/1d_futures"
+) -> dict[str, tuple[float, float, float]] | None:
+    """读当日日线 parquet → {归一化合约码: (low, high, pre_settle)}。文件缺失返回 None。
+
+    供 prepare_contract_snapshots 的守卫A 做日线 [Low,High] 边界。合约码经归一化对齐 tick
+    （大小写、郑商所 3↔4 位）。排除连续合约（码无月份）与 low/high=0 的空柱。
+    """
+    path = Path(daily_root) / trade_date[:4] / f"{trade_date}.parquet"
+    if not path.is_file():
+        return None
+    daily = pd.read_parquet(path)
+    code_col = daily["code"].astype(str)
+    has_digits = code_col.str.contains(r"\d", regex=True)
+    daily = daily.loc[has_digits].copy()
+    if daily.empty:
+        return None
+    daily["inst"] = code_col.loc[has_digits].str.split(".").str[0].map(normalize_contract_code)
+    daily[["low", "high", "pre_settle"]] = daily[["low", "high", "pre_settle"]].astype(float)
+    daily = daily.loc[(daily["low"] > 0) & (daily["high"] > 0)]
+    if daily.empty:
+        return None
+    agg = daily.groupby("inst").agg(
+        low=("low", "min"), high=("high", "max"), pre_settle=("pre_settle", "first")
+    )
+    return {inst: (float(r.low), float(r.high), float(r.pre_settle)) for inst, r in agg.iterrows()}
+
+
 def load_contract_snapshots(contract_file: ContractFile) -> pd.DataFrame:
     with contract_file.open_handle() as handle:
         df = pd.read_csv(handle, usecols=TICK_COLUMNS)
@@ -223,11 +272,14 @@ def load_contract_snapshots(contract_file: ContractFile) -> pd.DataFrame:
     return df
 
 
-def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
+def prepare_contract_snapshots(raw_df: pd.DataFrame, daily_bounds: dict | None = None) -> pd.DataFrame:
     """归一化交易时钟：生成内部 market_time_key、合并同时间键、计算差分与 interval_vwap。
 
     market_time_key 是 tick 链路唯一内部时间契约：排序、asof、窗口、间隔、断点、
     合并、恢复、replay 切片全部只使用它；自然日 timestamp 仅生成展示文本。
+
+    daily_bounds: {归一化合约码: (low, high, pre_settle)}，来自当日日线 parquet。
+    提供且同日校验通过时，守卫A 用日线 [Low,High]±容差（更紧）；否则退回涨跌停带。
     """
     if raw_df.empty:
         return raw_df.copy()
@@ -252,7 +304,19 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["is_tradable_session"] = df["session_state"].isin(["continuous_trading", "night_trading"])
 
     # 内部 market_time_key：交易日周期内单调递增，正确处理 21:xx -> 00:xx 跨午夜
-    df["market_time_key"] = df.apply(_compute_market_time_key, axis=1)
+    time_parts = df["UpdateTime"].astype(str).str.split(":")
+    total_millis = (
+        ((time_parts.str[0].astype(int).to_numpy() * 60
+          + time_parts.str[1].astype(int).to_numpy()) * 60
+         + time_parts.str[2].astype(int).to_numpy()) * 1000
+        + df["UpdateMillisec"].astype(int).to_numpy()
+    )
+    night_offset = 21 * 3600 * 1000
+    df["market_time_key"] = np.where(
+        total_millis >= night_offset,
+        total_millis - night_offset,
+        total_millis + 3 * 3600 * 1000,
+    )
     df = df.sort_values(["market_time_key", "snapshot_seq"], kind="stable").reset_index(drop=True)
 
     # 展示字段：保留原始交易日与显示时间，不输出 cycle 数值或伪造自然日
@@ -263,11 +327,27 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
         + df["UpdateMillisec"].astype(int).astype(str).str.zfill(3)
     )
 
+    # 累计 Turnover 回退 = 成交额计数器错位（feed 数据质量问题）。
+    # 在合并前按排序后的原始帧打标，_collapse 再聚合成帧级标记。
+    df["_raw_turnover_drop"] = df["Turnover"].astype(float).diff() < 0
+
     # 先合并同一 market_time_key 多行，最后一行提供盘口/累计值，保留序号范围
     df = _collapse_same_time_key(df)
 
     # 开盘保护标记（合并后帧）
-    df["is_open_protected"] = df.apply(_is_open_protected_row, axis=1)
+    time_parts = df["UpdateTime"].astype(str).str.split(":")
+    total_seconds = (
+        (time_parts.str[0].astype(int).to_numpy() * 60
+         + time_parts.str[1].astype(int).to_numpy()) * 60
+        + time_parts.str[2].astype(int).to_numpy()
+    )
+    is_open_protected = np.zeros(len(df), dtype=bool)
+    for session_open in SESSION_OPENS:
+        open_parts = session_open.split(":")
+        open_seconds = (int(open_parts[0]) * 60 + int(open_parts[1])) * 60 + int(open_parts[2])
+        delta_seconds = total_seconds - open_seconds
+        is_open_protected |= (delta_seconds >= 0) & (delta_seconds < OPEN_GUARD_SECONDS)
+    df["is_open_protected"] = is_open_protected
 
     # 盘口派生
     df["mid_price"] = np.where(
@@ -282,6 +362,11 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["delta_volume"] = df["Volume"].diff()
     df["delta_turnover"] = df["Turnover"].diff()
     _invalidate_blocked_diffs(df)
+
+    # 守卫B：累计成交额回退的帧，其 ΔTurnover 不可信，失效以免污染区间均价。
+    # 只动 delta_turnover（delta_volume 保留，末笔通道不受影响）。
+    if "frame_turnover_desync" in df.columns:
+        df.loc[df["frame_turnover_desync"].to_numpy(dtype=bool), "delta_turnover"] = np.nan
 
     # AveragePrice 单位校验（只校验单位，不能当作计数器同步证据）
     if multiplier is not None:
@@ -303,9 +388,58 @@ def prepare_contract_snapshots(raw_df: pd.DataFrame) -> pd.DataFrame:
             df.loc[valid_vwap, "delta_turnover"] / df.loc[valid_vwap, "delta_volume"] / multiplier
         )
 
-    # 数据质量标记（后续 Task 会扩充）
-    df["data_quality_flags"] = pd.Series([""] * len(df), dtype="object")
+    # 守卫A：区间均价越界失效。优先日线 [Low,High]±容差（更紧，需同日校验通过）；
+    # 否则退回 tick 自带涨跌停带 [跌停,涨停]（交易所强制，零误杀，全天恒定免疫夜盘归日）。
+    vwap = df["interval_vwap"]
+    daily_band = _resolve_daily_band(df, daily_bounds, tick_size)
+    if daily_band is not None:
+        band_lo, band_hi = daily_band
+        beyond = vwap.notna() & ((vwap < band_lo) | (vwap > band_hi))
+        beyond_flag = "vwap_beyond_daily"
+    else:
+        up = pd.to_numeric(df["UpperLimitPrice"], errors="coerce")
+        lo = pd.to_numeric(df["LowerLimitPrice"], errors="coerce")
+        beyond = vwap.notna() & (up > 0) & (lo > 0) & ((vwap < lo) | (vwap > up))
+        beyond_flag = "vwap_beyond_limit"
+    df.loc[beyond.to_numpy(dtype=bool), "interval_vwap"] = np.nan
+
+    # 数据质量标记
+    flags = np.array([""] * len(df), dtype=object)
+    if "frame_turnover_desync" in df.columns:
+        flags[df["frame_turnover_desync"].to_numpy(dtype=bool)] = "turnover_counter_desync"
+    flagged = beyond.to_numpy(dtype=bool) & (flags == "")
+    flags[flagged] = beyond_flag
+    df["data_quality_flags"] = flags
     return df
+
+
+def _resolve_daily_band(
+    df: pd.DataFrame, daily_bounds: dict | None, tick_size: float
+) -> tuple[float, float] | None:
+    """有日线且同日校验通过 -> (low - N·tick, high + N·tick)；否则 None（调用方退回涨跌停带）。
+
+    同日校验：tick 涨跌停中点 (涨+跌)/2 ≈ 日线 pre_settle。pre_settle 是交易日唯一锚，
+    对得上即证明 tick 文件与日线行属同一交易日，绕开夜盘归日口径问题。
+    """
+    if not daily_bounds or "contract" not in df.columns or len(df) == 0:
+        return None
+    ni = normalize_contract_code(str(df["contract"].iloc[0]))
+    entry = daily_bounds.get(ni)
+    if entry is None:
+        return None
+    d_low, d_high, d_pre_settle = (float(x) for x in entry)
+    if not (d_low > 0 and d_high > 0 and d_pre_settle > 0):
+        return None
+    up = pd.to_numeric(df["UpperLimitPrice"], errors="coerce")
+    lo = pd.to_numeric(df["LowerLimitPrice"], errors="coerce")
+    ok = up.notna() & lo.notna() & (up > 0) & (lo > 0)
+    if not ok.any():
+        return None
+    mid = (float(up[ok].median()) + float(lo[ok].median())) / 2.0
+    if abs(mid - d_pre_settle) / d_pre_settle > DAILY_SAMEDAY_TOLERANCE:
+        return None
+    tol = DAILY_VWAP_TOLERANCE_TICKS * (tick_size if tick_size and not np.isnan(tick_size) else 0.0)
+    return (d_low - tol, d_high + tol)
 
 
 # ---------------------------------------------------------------------------
@@ -334,24 +468,27 @@ def _collapse_same_time_key(df: pd.DataFrame) -> pd.DataFrame:
     """同一 market_time_key 多行先合并：最后一行提供盘口/累计值，保留序号范围。"""
     if df.empty:
         return df
-    collapsed: list[pd.DataFrame] = []
-    for _, group in df.groupby("market_time_key", sort=False):
-        if len(group) == 1:
-            collapsed.append(group.copy())
-            continue
-        merged = group.iloc[[-1]].copy()
-        merged["snapshot_seq_start"] = int(group["snapshot_seq"].iloc[0])
-        merged["snapshot_seq_end"] = int(group["snapshot_seq"].iloc[-1])
-        collapsed.append(merged)
-    out = pd.concat(collapsed, ignore_index=True)
-    if "snapshot_seq_start" not in out.columns:
-        out["snapshot_seq_start"] = out["snapshot_seq"]
+    keys = df["market_time_key"].to_numpy()
+    if len(keys) == 1:
+        first_positions = last_positions = np.array([0])
     else:
-        out["snapshot_seq_start"] = out["snapshot_seq_start"].fillna(out["snapshot_seq"])
-    if "snapshot_seq_end" not in out.columns:
-        out["snapshot_seq_end"] = out["snapshot_seq"]
-    else:
-        out["snapshot_seq_end"] = out["snapshot_seq_end"].fillna(out["snapshot_seq"])
+        new_group = np.empty(len(keys), dtype=bool)
+        new_group[0] = True
+        new_group[1:] = keys[1:] != keys[:-1]
+        first_positions = np.flatnonzero(new_group)
+        last_positions = np.concatenate((first_positions[1:], [len(keys)])) - 1
+
+    out = df.iloc[last_positions].copy().reset_index(drop=True)
+    sequence = df["snapshot_seq"].to_numpy()
+    out["snapshot_seq_start"] = sequence[first_positions]
+    out["snapshot_seq_end"] = sequence[last_positions]
+
+    # 把原始 Turnover 回退标记聚合成帧级：组内任一原始行回退，整帧成交额不可信。
+    if "_raw_turnover_drop" in df.columns:
+        drop = df["_raw_turnover_drop"].to_numpy(dtype=bool)
+        cum = np.concatenate(([0], np.cumsum(drop)))  # cum[i] = sum(drop[:i])
+        group_drops = cum[last_positions + 1] - cum[first_positions]
+        out["frame_turnover_desync"] = group_drops > 0
     return out
 
 
@@ -416,18 +553,12 @@ def _invalidate_blocked_diffs(df: pd.DataFrame) -> None:
         return
     invalidate = np.zeros(n, dtype=bool)
     invalidate[0] = True  # session 首条
-    keys = df["market_time_key"].to_numpy()
-    for i in range(1, n):
-        prev_tradable = bool(df["is_tradable_session"].iloc[i - 1])
-        cur_tradable = bool(df["is_tradable_session"].iloc[i])
-        if not (prev_tradable and cur_tradable):
-            # 跨 session 或非可交易行
-            invalidate[i] = True
-            continue
-        # 同一 session 内相邻时间键 gap > MAX_DATA_GAP_SECONDS(3s) 视为数据断点
-        gap_ms = int(keys[i]) - int(keys[i - 1])
-        if gap_ms > MAX_DATA_GAP_SECONDS * 1000:
-            invalidate[i] = True
+    keys = df["market_time_key"].to_numpy(dtype=np.int64)
+    tradable = df["is_tradable_session"].to_numpy(dtype=bool)
+    if n > 1:
+        cross_session = ~(tradable[:-1] & tradable[1:])
+        gap = keys[1:] - keys[:-1]
+        invalidate[1:] = cross_session | (gap > MAX_DATA_GAP_SECONDS * 1000)
     # 开盘保护行不差分
     invalidate = invalidate | df["is_open_protected"].to_numpy(dtype=bool)
     # 回退或零增量

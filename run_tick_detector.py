@@ -22,6 +22,7 @@ from src.tick_detector.tick_io import (
     COMMODITY_PROFILES,
     iter_day_contract_files,
     load_contract_snapshots,
+    load_daily_bounds,
     prepare_contract_snapshots,
 )
 
@@ -80,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commodities", required=False, help="可选，逗号分隔品种列表，如 AU,AG,CU")
     parser.add_argument("--contract", required=False, help="可选，限制检测目标合约")
     parser.add_argument("--output-dir", required=False, help="输出目录")
+    parser.add_argument(
+        "--only-with-events",
+        action="store_true",
+        help="无候选事件的品种不输出 HTML/CSV（批量跑批用，避免空品种堆积）",
+    )
     return parser
 
 
@@ -111,6 +117,7 @@ def run_detection(
     commodity: str | None = None,
     contract: str | None = None,
     commodities: str | None = None,
+    only_with_events: bool = False,
 ) -> dict[str, object]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -139,6 +146,8 @@ def run_detection(
             )
     commodity_items = list(commodity_files.items())
     html_files: list[str] = []
+    daily_bounds: dict | None = None
+    daily_bounds_loaded = False
 
     for commodity_index, (commodity_code, contract_files) in enumerate(commodity_items, start=1):
         print(
@@ -155,7 +164,18 @@ def run_detection(
             raw = load_contract_snapshots(contract_file)
             if raw.empty or raw["parse_status"].iloc[0] != "ok":
                 continue
-            prepared = prepare_contract_snapshots(raw)
+            if not daily_bounds_loaded:
+                trade_date = str(raw["trade_date"].iloc[0]) if "trade_date" in raw.columns else ""
+                daily_bounds = load_daily_bounds(trade_date) if trade_date else None
+                daily_bounds_loaded = True
+                if daily_bounds is not None:
+                    print(
+                        f"  - 加载日线边界 {trade_date}（{len(daily_bounds)} 合约），守卫A 用日线[Low,High]",
+                        flush=True,
+                    )
+                else:
+                    print(f"  - 未找到 {trade_date} 日线，守卫A 退回涨跌停带", flush=True)
+            prepared = prepare_contract_snapshots(raw, daily_bounds=daily_bounds)
             if prepared.empty:
                 continue
             contract_code = str(prepared["contract"].iloc[0])
@@ -176,14 +196,17 @@ def run_detection(
                 f"    * 检测 {commodity_code} 目标 {target_index}/{len(commodity_targets)}：{target_code}",
                 flush=True,
             )
-            events, diag = _detect_contract(target_code, day_frames)
+            events, diag, marked = _detect_contract(target_code, day_frames)
             commodity_diagnostics.append(diag)
             if events is not None and not events.empty:
                 all_events.append(events)
                 commodity_events.append(events)
-                _build_replay_payload(events, target_code, day_frames, commodity_payload)
+                _build_replay_payload(events, target_code, marked, day_frames, commodity_payload)
 
         commodity_events_df = _build_events_df(commodity_events)
+        if commodity_events_df.empty and only_with_events:
+            print(f"  - {commodity_code} 无候选事件，跳过输出（--only-with-events）", flush=True)
+            continue
         html_path = output_path / f"event_replay_{commodity_code}.html"
         html_path.write_text(
             render_event_replay_html(commodity_events_df, commodity_payload, commodity_diagnostics),
@@ -195,7 +218,8 @@ def run_detection(
     events_df = _build_events_df(all_events)
     events_df_chinese = _map_to_chinese_csv(events_df)
     csv_path = output_path / "tick_candidate_events.csv"
-    events_df_chinese.to_csv(csv_path, index=False)
+    if not events_df.empty or not only_with_events:
+        events_df_chinese.to_csv(csv_path, index=False)
     if len(html_files) == 1:
         legacy_html_path = output_path / "event_replay.html"
         legacy_html_path.write_text(Path(html_files[0]).read_text(encoding="utf-8"), encoding="utf-8")
@@ -227,12 +251,14 @@ def _detect_contract(
             parameter_profile, validation_status,
             candidates_count=0,
         )
-        return None, diag
+        return None, diag, None
 
     ref_codes = select_reference_contracts(day_frames, target_code)
     reference_frames = {code: day_frames[code] for code in ref_codes if code in day_frames}
     enriched = attach_fair_price_metrics(target_df, reference_frames, tick_size=tick_size)
-    candidates = detect_candidate_ticks(enriched)
+    # marked = 全行检测帧（含 fair_price / last_down_ticks / vwap_down_ticks），供复盘窗口展示
+    marked = detect_candidate_ticks(enriched, return_marked=True)
+    candidates = marked.loc[marked["candidate_execution_depth"].notna()].copy()
     events = merge_candidates(candidates, enriched)
     if events.empty:
         diag = _build_diagnostics(
@@ -240,7 +266,7 @@ def _detect_contract(
             parameter_profile, validation_status,
             candidates_count=0,
         )
-        return events, diag
+        return events, diag, marked
 
     profile = {"tick_size": tick_size, "contract_multiplier": multiplier}
     events = attach_recovery_metrics(events, enriched, reference_frames, profile)
@@ -250,7 +276,7 @@ def _detect_contract(
         parameter_profile, validation_status,
         candidates_count=len(events),
     )
-    return events, diag
+    return events, diag, marked
 
 
 def _build_diagnostics(
@@ -387,15 +413,20 @@ def _map_to_chinese_csv(events_df: pd.DataFrame) -> pd.DataFrame:
 def _build_replay_payload(
     events: pd.DataFrame,
     target_code: str,
+    target_frame: pd.DataFrame,
     day_frames: dict[str, pd.DataFrame],
     replay_payload: dict[str, dict[str, object]],
 ) -> None:
-    """为每个事件构建 [锚点前60秒, 锚点后10秒] 同窗口 replay payload。"""
-    target_df = day_frames[target_code]
+    """为每个事件构建 [锚点前10秒, 锚点后10秒] 同窗口 replay payload。
+
+    target_frame 用检测后的全行帧（含 fair_price / last_down_ticks / vwap_down_ticks），
+    这样目标检测明细能展示检测派生列；参考合约窗口仍取 day_frames 的原始帧。
+    """
+    target_df = target_frame
     for _, event in events.iterrows():
         event_id = str(event["event_id"])
         anchor_key = int(event["event_anchor_key"])
-        window_start = anchor_key - 60 * 1000
+        window_start = anchor_key - 10 * 1000
         window_end = anchor_key + 10 * 1000
         window = target_df.loc[
             (target_df["market_time_key"] >= window_start)
@@ -451,6 +482,7 @@ def _build_peer_raw_windows(
         "LastPrice", "Volume", "Turnover", "BidPrice1", "BidVolume1",
         "AskPrice1", "AskVolume1", "AveragePrice", "OpenInterest",
         "UpperLimitPrice", "LowerLimitPrice",
+        "delta_volume", "delta_turnover", "interval_vwap",
     ]
     for code in peer_contracts:
         frame = day_frames.get(code)
@@ -504,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         commodities=args.commodities,
         contract=args.contract,
         output_dir=args.output_dir,
+        only_with_events=args.only_with_events,
     )
     return 0
 
