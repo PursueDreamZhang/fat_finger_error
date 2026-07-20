@@ -75,6 +75,7 @@ DIAGNOSTICS_COLUMNS = [
     ("contract", "合约"),
     ("parameter_profile", "参数档"),
     ("validation_status", "验证状态"),
+    ("day_total_volume", "当日成交总量"),
     ("raw_rows", "原始行数"),
     ("merged_rows", "同时间键合并后行数"),
     ("tradable_rows", "可检测行数"),

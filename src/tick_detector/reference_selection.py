@@ -43,6 +43,7 @@ def attach_fair_price_metrics(
     target_df: pd.DataFrame,
     reference_frames: dict[str, pd.DataFrame],
     tick_size: float,
+    top_volume_peer_contracts: set[str] | None = None,
 ) -> pd.DataFrame:
     """为 enriched target frame 写入 fair_price、noise history、阈值与参考质量。
 
@@ -70,7 +71,14 @@ def attach_fair_price_metrics(
     out["vwap_noise_robust_sigma"] = np.nan
     out["execution_depth_robust_sigma"] = np.nan
 
-    # 为每个 peer 预计算与 target 行对齐的 asof mid / spread / 有效性
+    # 为每个 peer 预计算与 target 行对齐的 asof mid / spread / 有效性。
+    # 入口会传入全天成交量前三；默认按传入参考池推导，兼容独立调用。
+    if top_volume_peer_contracts is None:
+        top_volume_peer_contracts = set(sorted(
+            reference_frames,
+            key=lambda code: (-float(reference_frames[code]["Volume"].max()), code),
+        )[:3])
+
     peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
 
     # Pass 1 输出预分配：循环内只写数组，结束后一次性写回 DataFrame。
@@ -155,7 +163,10 @@ def attach_fair_price_metrics(
         valid_peer_contracts_col[i] = valid_peers
         peer_bases_col[i] = peer_bases
 
-        if len(valid_peers) < MIN_VALID_PEERS:
+        if (
+            len(valid_peers) < MIN_VALID_PEERS
+            or not any(code in top_volume_peer_contracts for code in valid_peers)
+        ):
             pass1_blocked[i] = "insufficient_peers"
             continue
 

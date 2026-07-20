@@ -196,7 +196,8 @@ def run_detection(
             contract_code = str(prepared["contract"].iloc[0])
             day_frames[contract_code] = prepared
 
-        commodity_targets = [
+        # 目标以外不足 3 个真实同品种合约时，无法满足成交量前三参考约束，直接跳过。
+        commodity_targets = [] if len(day_frames) < 4 else [
             code for code in sorted(day_frames) if contract_filter is None or code.upper() == contract_filter
         ]
         print(
@@ -272,7 +273,12 @@ def _detect_contract(
 
     ref_codes = select_reference_contracts(day_frames, target_code)
     reference_frames = {code: day_frames[code] for code in ref_codes if code in day_frames}
-    enriched = attach_fair_price_metrics(target_df, reference_frames, tick_size=tick_size)
+    enriched = attach_fair_price_metrics(
+        target_df,
+        reference_frames,
+        tick_size=tick_size,
+        top_volume_peer_contracts=set(ref_codes[:3]),
+    )
     # marked = 全行检测帧（含 fair_price / last_down_ticks / vwap_down_ticks），供复盘窗口展示
     marked = detect_candidate_ticks(enriched, return_marked=True)
     candidates = marked.loc[marked["candidate_execution_depth"].notna()].copy()
@@ -382,10 +388,12 @@ def _build_diagnostics(
         counter_lag = int(enriched["data_quality_flags"].astype(str).str.contains("counter_lag_suspect").sum())
 
     tradable = int(enriched.get("is_tradable_session", pd.Series([True] * n)).sum()) if "is_tradable_session" in enriched.columns else n
+    volumes = pd.to_numeric(enriched.get("Volume", pd.Series(dtype=float)), errors="coerce").dropna()
     return {
         "contract": contract,
         "parameter_profile": parameter_profile,
         "validation_status": validation_status,
+        "day_total_volume": int(volumes.iloc[-1]) if not volumes.empty else None,
         "raw_rows": raw_rows,
         "merged_rows": merged_rows,
         "tradable_rows": tradable,

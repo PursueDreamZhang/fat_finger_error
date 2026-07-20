@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from run_tick_detector import _build_peer_raw_windows, parse_args, run_detection
+from run_tick_detector import _build_diagnostics, _build_peer_raw_windows, parse_args, run_detection
 from src.tick_detector.report_html import _render_peer_blocks
 
 
@@ -139,6 +139,19 @@ def test_peer_window_marks_exact_or_earlier_nearest_reference_snapshot():
     assert "<tr class='reference-anchor-row'>" in _render_peer_blocks({"AU2608": nearest_rows})
 
 
+def test_diagnostics_reports_final_cumulative_volume():
+    diagnostic = _build_diagnostics(
+        "AU2606",
+        pd.DataFrame({"Volume": [10, None, 25]}),
+        raw_rows=3,
+        merged_rows=3,
+        parameter_profile="AUTO_INFERRED_V1",
+        validation_status="validated",
+        candidates_count=0,
+    )
+    assert diagnostic["day_total_volume"] == 25
+
+
 def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_path):
     """零候选 CSV 仍含中文表头，HTML 含合约诊断"""
     day_dir = tmp_path / "20260520"
@@ -147,6 +160,7 @@ def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_
     _write_csv(day_dir / "au2606_20260520.csv", [_tick_row("au2606", "09:01:30", 0)])
     _write_csv(day_dir / "au2608_20260520.csv", [_tick_row("au2608", "09:01:30", 0)])
     _write_csv(day_dir / "au2610_20260520.csv", [_tick_row("au2610", "09:01:30", 0)])
+    _write_csv(day_dir / "au2612_20260520.csv", [_tick_row("au2612", "09:01:30", 0)])
 
     output_dir = tmp_path / "out"
     result = run_detection(
@@ -169,6 +183,24 @@ def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_
     assert "合理价" in events.columns
     assert "回归标签" in events.columns
     assert len(events) == 0  # 零候选
+
+
+def test_run_detection_skips_targets_with_fewer_than_three_other_contracts(tmp_path):
+    day_dir = tmp_path / "20260520"
+    day_dir.mkdir()
+    for code in ("au2606", "au2608", "au2610"):
+        _write_csv(day_dir / f"{code}_20260520.csv", [_tick_row(code, "09:01:30", 0)])
+
+    output_dir = tmp_path / "out"
+    run_detection(
+        tick_day_path=str(day_dir),
+        commodity="AU",
+        contract="AU2606",
+        output_dir=str(output_dir),
+    )
+
+    html = (output_dir / "event_replay.html").read_text(encoding="utf-8")
+    assert "AU2606" not in html
 
 
 def test_parallel_targets_match_serial_output(tmp_path):
@@ -202,6 +234,7 @@ def test_run_detection_html_shows_diagnostics_for_zero_candidates(tmp_path):
     _write_csv(day_dir / "au2606_20260520.csv", [_tick_row("au2606", "09:01:30", 0)])
     _write_csv(day_dir / "au2608_20260520.csv", [_tick_row("au2608", "09:01:30", 0)])
     _write_csv(day_dir / "au2610_20260520.csv", [_tick_row("au2610", "09:01:30", 0)])
+    _write_csv(day_dir / "au2612_20260520.csv", [_tick_row("au2612", "09:01:30", 0)])
     output_dir = tmp_path / "out"
     run_detection(
         tick_day_path=str(day_dir),
@@ -211,6 +244,7 @@ def test_run_detection_html_shows_diagnostics_for_zero_candidates(tmp_path):
     )
     html = (output_dir / "event_replay.html").read_text(encoding="utf-8")
     assert "合约运行诊断" in html
+    assert "当日成交总量" in html
     assert "原始行数" in html
     assert "候选事件数" in html
 

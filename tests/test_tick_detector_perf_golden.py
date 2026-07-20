@@ -77,6 +77,7 @@ def _build_synthetic_day(day_dir: Path) -> None:
     target_rows: list[dict[str, object]] = []
     peer_a_rows: list[dict[str, object]] = []
     peer_b_rows: list[dict[str, object]] = []
+    peer_c_rows: list[dict[str, object]] = []
     for sec in range(320):
         total_sec = 9 * 3600 + 30 * 60 + sec
         update_time = f"{total_sec // 3600:02d}:{total_sec // 60 % 60:02d}:{total_sec % 60:02d}"
@@ -98,10 +99,17 @@ def _build_synthetic_day(day_dir: Path) -> None:
         peer_b_rows.append(
             _tick_row("au2610", update_time, volume=18 + sec, turnover=(18 + sec) * 1_000_000.0)
         )
+        peer_c_rows.append(
+            _tick_row(
+                "au2612", update_time, volume=1 + sec, bid=0.0, ask=0.0,
+                turnover=(1 + sec) * 1_000_000.0,
+            )
+        )
     day_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(day_dir / "au2606_20260520.csv", target_rows)
     _write_csv(day_dir / "au2608_20260520.csv", peer_a_rows)
     _write_csv(day_dir / "au2610_20260520.csv", peer_b_rows)
+    _write_csv(day_dir / "au2612_20260520.csv", peer_c_rows)
 
 
 def _load_prepared_frames(day_path: Path, commodity: str) -> dict[str, pd.DataFrame]:

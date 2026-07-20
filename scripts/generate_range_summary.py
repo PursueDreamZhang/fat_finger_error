@@ -127,6 +127,11 @@ def generate_range_summary(
         )
         if not events.empty:
             event_parts.append(events)
+        hit_commodities = (
+            sorted(events["品种"].dropna().astype(str).str.upper().unique())
+            if "品种" in events
+            else []
+        )
         status = "complete"
         if filtered_counts.get("failed", 0):
             status = "failed"
@@ -137,6 +142,7 @@ def generate_range_summary(
             "status": status,
             "events": int(len(events)),
             "hits": int(filtered_counts.get("success_with_events", 0)),
+            "hit_commodities": hit_commodities,
             "failed": int(filtered_counts.get("failed", 0)),
             "elapsed_seconds": payload.get("elapsed_seconds"),
             "summary_path": rel_summary,
@@ -244,7 +250,7 @@ def _render_html(payload: dict[str, Any], events: pd.DataFrame) -> str:
                 f"<td>{cell}</td>" for cell in [
                     _h(row["day"]),
                     _h(row["events"]),
-                    _h(row["hits"]),
+                    _h(", ".join(row["hit_commodities"])),
                     _link(row["summary_path"], "查看日汇总"),
                     _h(_duration(row.get("elapsed_seconds"))),
                 ]
@@ -296,7 +302,7 @@ def _render_html(payload: dict[str, Any], events: pd.DataFrame) -> str:
         "".join(f"<div class='card'><span>{_h(label)}</span><strong>{_h(value)}</strong></div>" for label, value in cards),
         "</div>",
         "<h2>时间日期汇总</h2>",
-        _table(["日期", "候选事件数", "命中品种数", "日汇总", "耗时"], day_rows),
+        _table(["日期", "候选事件数", "命中品种", "日汇总", "耗时"], day_rows),
         f"<p class='note'>共 {hit_day_count} 个日期出现疑似乌龙指候选事件。</p>",
         "<h2>品种汇总</h2>",
         _table(["品种", "累计事件数", "涉及交易日数", "涉及合约数", "主要触发原因", "主要回归标签"], commodity_rows),

@@ -43,7 +43,17 @@ def test_generate_range_summary_distinguishes_complete_failed_and_missing(tmp_pa
                 "合理价": 995.33,
                 "区间成交均价": 940.52,
                 "回归标签": "trade_recovered_3s",
-            }]
+            }],
+            "AG": [{
+                "交易日": "20260520",
+                "品种": "AG",
+                "合约": "AG2606",
+                "事件时间": "21:05:00.000",
+                "触发原因": "visible_execution_drop",
+                "合理价": 995.33,
+                "区间成交均价": 940.52,
+                "回归标签": "trade_recovered_3s",
+            }],
         },
     )
     failed_dir = output_root / "20260521-par"
@@ -71,14 +81,16 @@ def test_generate_range_summary_distinguishes_complete_failed_and_missing(tmp_pa
         "missing_days": 1,
         "missing_output_days": 0,
         "incomplete_days": 0,
-        "event_count": 1,
-        "hit_commodities": 1,
+        "event_count": 2,
+        "hit_commodities": 2,
     }
     html = (out_dir / "range_summary.html").read_text(encoding="utf-8")
     hit_section = html.split("<h2>时间日期汇总</h2>", 1)[1].split("<h2>品种汇总</h2>", 1)[0]
     assert "20260520" in hit_section
     assert "20260521" not in hit_section
     assert "20260522" not in hit_section
+    assert "<th>命中品种</th>" in hit_section
+    assert "<td>AG, AU</td>" in hit_section
     assert "事件明细" not in html
     assert "boom &lt;bad&gt;" in html
     assert "失败" in html

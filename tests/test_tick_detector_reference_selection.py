@@ -98,6 +98,19 @@ def test_select_reference_contracts_picks_top5_by_daily_volume_excluding_target_
     assert refs == ["AU2608", "AU2610"]
 
 
+def test_select_reference_contracts_uses_daily_volume_then_contract_code_for_top3():
+    target = _contract_frame("AU2606", "AU", [{"Volume": 100}])
+    frames = {
+        "AU2612": _contract_frame("AU2612", "AU", [{"Volume": 200}]),
+        "AU2608": _contract_frame("AU2608", "AU", [{"Volume": 300}]),
+        "AU2610": _contract_frame("AU2610", "AU", [{"Volume": 300}]),
+        "AU2614": _contract_frame("AU2614", "AU", [{"Volume": 100}]),
+        "AU2606": target,
+    }
+
+    assert select_reference_contracts(frames, "AU2606")[:3] == ["AU2608", "AU2610", "AU2612"]
+
+
 def test_build_peer_aligned_preserves_asof_boundaries_and_quote_validation():
     target = _contract_frame(
         "AU2606",
@@ -168,6 +181,37 @@ def test_fair_price_unreliable_when_fewer_than_two_peers():
     row = out.iloc[-1]
     assert row["fair_price_reliable"] is False or row["fair_price_reliable"] == False  # noqa: E712
     assert math.isnan(row["fair_price"]) if pd.isna(row["fair_price"]) else True
+
+
+def test_fair_price_requires_one_valid_peer_from_daily_volume_top3():
+    target, peer_a, peer_b = _two_peers_stable()
+    out = attach_fair_price_metrics(
+        target,
+        {"AU2608": peer_a, "AU2610": peer_b},
+        tick_size=0.02,
+        top_volume_peer_contracts={"AU2612", "AU2614", "AU2616"},
+    )
+
+    row = out.iloc[-1]
+    assert row["valid_peer_count"] == 2
+    assert row["__valid_peer_contracts"] == ["AU2608", "AU2610"]
+    assert row["reference_blocked_reason"] == "insufficient_peers"
+    assert not bool(row["fair_price_reliable"])
+    assert pd.isna(row["fair_price"])
+
+
+def test_fair_price_passes_when_one_valid_peer_is_in_daily_volume_top3():
+    target, peer_a, peer_b = _two_peers_stable()
+    out = attach_fair_price_metrics(
+        target,
+        {"AU2608": peer_a, "AU2610": peer_b},
+        tick_size=0.02,
+        top_volume_peer_contracts={"AU2608", "AU2612", "AU2614"},
+    )
+
+    row = out.iloc[-1]
+    assert bool(row["fair_price_reliable"])
+    assert row["fair_price"] == pytest.approx(100.0, abs=0.05)
 
 
 def test_fair_price_records_internal_peer_bases_for_event_chain():
