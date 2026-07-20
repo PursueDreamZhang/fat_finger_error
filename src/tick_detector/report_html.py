@@ -190,7 +190,7 @@ def _render_event_section(event: dict[str, object], payload: dict[str, object]) 
         f"<p class='section-note'>窗口为锚点前 10 秒至后 10 秒。红色行为候选锚点。</p>"
         f"{detail_table}"
         f"<h3>参考合约原始快照</h3>"
-        f"<p class='section-note'>每个参与合理价计算的参考合约在同一窗口的原始行情。</p>"
+        f"<p class='section-note'>每个参与合理价计算的参考合约在同一窗口的原始行情。浅蓝色行为与事件同刻或最近的对照快照。</p>"
         f"{peer_blocks}"
         f"</div>"
         f"</section>"
@@ -222,7 +222,8 @@ def _render_peer_blocks(peer_windows: dict[str, list]) -> str:
         body_rows = []
         for row in rows:
             cells = "".join(f"<td>{_format_value(row.get(key))}</td>" for key, _ in PEER_RAW_COLUMNS)
-            body_rows.append(f"<tr>{cells}</tr>")
+            cls = "reference-anchor-row" if row.get("__is_reference_anchor") else ""
+            body_rows.append(f"<tr class='{cls}'>{cells}</tr>")
         blocks.append(f"<table><thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>")
     return "".join(blocks)
 
@@ -309,6 +310,7 @@ def _style_block() -> str:
       th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; text-align: left; vertical-align: top; }
       th { background: #f3f4f6; position: sticky; top: 0; }
       .anchor-row td { background: #fee2e2; font-weight: 700; }
+      .reference-anchor-row td { background: #e0f2fe; font-weight: 700; }
       .empty { padding: 16px; background: white; border-radius: 12px; border: 1px solid #e5e7eb; }
       .section-note { color: #6b7280; margin: 6px 0 10px; }
       @media (max-width: 720px) {

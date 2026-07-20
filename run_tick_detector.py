@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
+import multiprocessing as mp
 from pathlib import Path
 import re
 
@@ -27,6 +29,8 @@ from src.tick_detector.tick_io import (
 )
 
 DETECTOR_VERSION = "aggregated-tick-v1"
+
+_WORKER_DAY_FRAMES: dict[str, pd.DataFrame] = {}
 
 # 中文 CSV 列定义（设计文档 §9）：(内部英文键, 中文表头)
 CSV_COLUMNS: list[tuple[str, str]] = [
@@ -86,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="无候选事件的品种不输出 HTML/CSV（批量跑批用，避免空品种堆积）",
     )
+    parser.add_argument(
+        "--target-workers",
+        type=int,
+        default=1,
+        help="同一品种内并行检测的目标合约进程数（默认 1）",
+    )
     return parser
 
 
@@ -104,6 +114,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--contract 必须属于 --commodities 指定的品种")
     if args.contract and args.commodity and _commodity_from_contract(args.contract) != args.commodity.upper():
         parser.error("--contract 必须属于 --commodity 指定的品种")
+    if args.target_workers < 1:
+        parser.error("--target-workers 必须大于等于 1")
     if not args.output_dir:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = str(Path("output") / f"{timestamp}-tick-detector")
@@ -118,7 +130,10 @@ def run_detection(
     contract: str | None = None,
     commodities: str | None = None,
     only_with_events: bool = False,
+    target_workers: int = 1,
 ) -> dict[str, object]:
+    if target_workers < 1:
+        raise ValueError("target_workers 必须大于等于 1")
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     if commodities:
@@ -191,12 +206,14 @@ def run_detection(
         commodity_events: list[pd.DataFrame] = []
         commodity_payload: dict[str, dict[str, object]] = {}
         commodity_diagnostics: list[dict[str, object]] = []
-        for target_index, target_code in enumerate(commodity_targets, start=1):
-            print(
-                f"    * 检测 {commodity_code} 目标 {target_index}/{len(commodity_targets)}：{target_code}",
-                flush=True,
-            )
-            events, diag, marked = _detect_contract(target_code, day_frames)
+        target_results = _detect_targets(
+            commodity_code,
+            commodity_targets,
+            day_frames,
+            target_workers=target_workers,
+        )
+        for target_code in commodity_targets:
+            events, diag, marked = target_results[target_code]
             commodity_diagnostics.append(diag)
             if events is not None and not events.empty:
                 all_events.append(events)
@@ -233,7 +250,7 @@ def run_detection(
 def _detect_contract(
     target_code: str,
     day_frames: dict[str, pd.DataFrame],
-) -> tuple[pd.DataFrame | None, dict[str, object]]:
+) -> tuple[pd.DataFrame | None, dict[str, object], pd.DataFrame | None]:
     """对单个目标执行检测链，返回事件 DataFrame 与合约诊断。"""
     target_df = day_frames[target_code]
     validation_status = str(target_df["validation_status"].iloc[0]) if "validation_status" in target_df.columns else "unvalidated_commodity"
@@ -266,7 +283,7 @@ def _detect_contract(
             parameter_profile, validation_status,
             candidates_count=0,
         )
-        return events, diag, marked
+        return events, diag, None
 
     profile = {"tick_size": tick_size, "contract_multiplier": multiplier}
     events = attach_recovery_metrics(events, enriched, reference_frames, profile)
@@ -277,6 +294,68 @@ def _detect_contract(
         candidates_count=len(events),
     )
     return events, diag, marked
+
+
+def _detect_targets(
+    commodity_code: str,
+    target_codes: list[str],
+    day_frames: dict[str, pd.DataFrame],
+    *,
+    target_workers: int,
+) -> dict[str, tuple[pd.DataFrame | None, dict[str, object], pd.DataFrame | None]]:
+    """按目标合约并行检测；fork 共享只读日数据，避免重复装载和序列化。"""
+    workers = min(target_workers, len(target_codes))
+    if workers <= 1 or "fork" not in mp.get_all_start_methods():
+        results = {}
+        for index, target_code in enumerate(target_codes, start=1):
+            print(f"    * 检测 {commodity_code} 目标 {index}/{len(target_codes)}：{target_code}", flush=True)
+            results[target_code] = _detect_contract(
+                target_code,
+                day_frames,
+            )
+        return results
+
+    print(f"    * {commodity_code} 品种内并行：{workers} 个进程", flush=True)
+    results = {}
+    context = mp.get_context("fork")
+    try:
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+            initializer=_init_target_worker,
+            initargs=(day_frames,),
+        )
+    except (OSError, PermissionError, NotImplementedError) as exc:
+        print(f"    * 当前环境不能创建子进程，退回串行：{exc}", flush=True)
+        return _detect_targets(
+            commodity_code,
+            target_codes,
+            day_frames,
+            target_workers=1,
+        )
+    with executor:
+        futures = {executor.submit(_detect_contract_worker, code): code for code in target_codes}
+        completed = 0
+        for future in as_completed(futures):
+            target_code, result = future.result()
+            results[target_code] = result
+            completed += 1
+            print(f"    * 完成 {commodity_code} 目标 {completed}/{len(target_codes)}：{target_code}", flush=True)
+    return results
+
+
+def _init_target_worker(day_frames: dict[str, pd.DataFrame]) -> None:
+    global _WORKER_DAY_FRAMES
+    _WORKER_DAY_FRAMES = day_frames
+
+
+def _detect_contract_worker(
+    target_code: str,
+) -> tuple[str, tuple[pd.DataFrame | None, dict[str, object], pd.DataFrame | None]]:
+    return target_code, _detect_contract(
+        target_code,
+        _WORKER_DAY_FRAMES,
+    )
 
 
 def _build_diagnostics(
@@ -492,8 +571,21 @@ def _build_peer_raw_windows(
         window = frame.loc[
             (frame["market_time_key"] >= window_start)
             & (frame["market_time_key"] <= window_end)
-        ]
+        ].copy()
+        if not window.empty:
+            anchor_key = int(event["event_anchor_key"])
+            reference_anchor_index = (
+                window.assign(
+                    __anchor_distance=(window["market_time_key"] - anchor_key).abs(),
+                )
+                .sort_values(["__anchor_distance", "market_time_key"], kind="stable")
+                .index[0]
+            )
+            window["__is_reference_anchor"] = window.index == reference_anchor_index
         available = [c for c in raw_cols if c in window.columns]
+        for internal_col in ("market_time_key", "__is_reference_anchor"):
+            if internal_col in window.columns:
+                available.append(internal_col)
         result[code] = window[available].to_dict("records") if available else []
     return result
 
@@ -537,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
         contract=args.contract,
         output_dir=args.output_dir,
         only_with_events=args.only_with_events,
+        target_workers=args.target_workers,
     )
     return 0
 

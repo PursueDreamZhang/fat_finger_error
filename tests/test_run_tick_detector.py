@@ -5,7 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from run_tick_detector import parse_args, run_detection
+from run_tick_detector import _build_peer_raw_windows, parse_args, run_detection
+from src.tick_detector.report_html import _render_peer_blocks
 
 
 def test_tick_day_path_is_required():
@@ -51,6 +52,20 @@ def test_commodities_accepts_multiple_codes_and_rejects_conflicts():
     with pytest.raises(SystemExit):
         parse_args(
             ["--tick-day-path", "data/tick2026/202605/20260520.zip", "--commodities", ",,"]
+        )
+
+
+def test_target_worker_validation():
+    args = parse_args(
+        [
+            "--tick-day-path", "data/tick2026/202605/20260520.zip",
+            "--target-workers", "2",
+        ]
+    )
+    assert args.target_workers == 2
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--tick-day-path", "data/tick2026/202605/20260520.zip", "--target-workers", "0"]
         )
 
 
@@ -107,6 +122,23 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     pd.DataFrame(rows, columns=_TICK_COLUMNS).to_csv(path, index=False)
 
 
+def test_peer_window_marks_exact_or_earlier_nearest_reference_snapshot():
+    event = pd.Series({"event_anchor_key": 1000, "__valid_peer_contracts": ["AU2608"]})
+    exact_frame = pd.DataFrame(
+        {
+            "market_time_key": [999, 1000, 1001],
+            "display_time": ["09:00:00.999", "09:00:01.000", "09:00:01.001"],
+        }
+    )
+    exact_rows = _build_peer_raw_windows(event, {"AU2608": exact_frame}, 990, 1010)["AU2608"]
+    assert [row.get("__is_reference_anchor", False) for row in exact_rows] == [False, True, False]
+
+    nearest_frame = exact_frame[exact_frame["market_time_key"] != 1000]
+    nearest_rows = _build_peer_raw_windows(event, {"AU2608": nearest_frame}, 990, 1010)["AU2608"]
+    assert [row.get("__is_reference_anchor", False) for row in nearest_rows] == [True, False]
+    assert "<tr class='reference-anchor-row'>" in _render_peer_blocks({"AU2608": nearest_rows})
+
+
 def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_path):
     """零候选 CSV 仍含中文表头，HTML 含合约诊断"""
     day_dir = tmp_path / "20260520"
@@ -137,6 +169,30 @@ def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_
     assert "合理价" in events.columns
     assert "回归标签" in events.columns
     assert len(events) == 0  # 零候选
+
+
+def test_parallel_targets_match_serial_output(tmp_path):
+    day_dir = tmp_path / "20260520"
+    day_dir.mkdir()
+    for code in ("au2606", "au2608", "au2610"):
+        _write_csv(day_dir / f"{code}_20260520.csv", [_tick_row(code, "09:01:30", 0)])
+
+    serial_dir = tmp_path / "serial"
+    parallel_dir = tmp_path / "parallel"
+    run_detection(tick_day_path=str(day_dir), commodity="AU", output_dir=str(serial_dir))
+    run_detection(
+        tick_day_path=str(day_dir),
+        commodity="AU",
+        output_dir=str(parallel_dir),
+        target_workers=2,
+    )
+
+    assert (parallel_dir / "event_replay_AU.html").read_text(encoding="utf-8") == (
+        serial_dir / "event_replay_AU.html"
+    ).read_text(encoding="utf-8")
+    assert (parallel_dir / "tick_candidate_events.csv").read_text(encoding="utf-8") == (
+        serial_dir / "tick_candidate_events.csv"
+    ).read_text(encoding="utf-8")
 
 
 def test_run_detection_html_shows_diagnostics_for_zero_candidates(tmp_path):
