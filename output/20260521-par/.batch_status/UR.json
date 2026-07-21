@@ -1,0 +1,15 @@
+{
+  "commodity": "UR",
+  "status": "success_no_events",
+  "started_at": "2026-07-19T12:53:54+0800",
+  "finished_at": "2026-07-19T12:54:39+0800",
+  "elapsed_seconds": 45.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "UR",
+  "event_replay_html": "UR/event_replay_UR.html",
+  "events_csv": "UR/tick_candidate_events.csv",
+  "log_file": "logs/UR.log",
+  "exit_code": 0,
+  "error": null
+}

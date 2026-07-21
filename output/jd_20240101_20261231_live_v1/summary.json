@@ -1,0 +1,15 @@
+{
+  "overview": {
+    "symbols": [
+      "JD"
+    ],
+    "start_date": "20240101",
+    "end_date": "20261231",
+    "candidate_count": 0,
+    "invalid_sample_count": 0
+  },
+  "commodity_summary": [],
+  "suspicious_dates": [],
+  "detail_records": [],
+  "invalid_samples": []
+}

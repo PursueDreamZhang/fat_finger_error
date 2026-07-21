@@ -1,0 +1,2 @@
+﻿detail_id,commodity,contract,trade_date,candidate_score,candidate_level,trigger_reasons,main_reference_contract
+AU|AU2606|2026-05-20,AU,AU2606,2026-05-20,80.0,high,振幅异常；结构失真,AU2606

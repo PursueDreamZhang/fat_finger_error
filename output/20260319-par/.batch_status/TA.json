@@ -1,0 +1,15 @@
+{
+  "commodity": "TA",
+  "status": "success_with_events",
+  "started_at": "2026-07-20T00:38:20+0800",
+  "finished_at": "2026-07-20T00:40:14+0800",
+  "elapsed_seconds": 114.0,
+  "event_count": 3,
+  "contract_count": 3,
+  "output_dir": "TA",
+  "event_replay_html": "TA/event_replay_TA.html",
+  "events_csv": "TA/tick_candidate_events.csv",
+  "log_file": "logs/TA.log",
+  "exit_code": 0,
+  "error": null
+}

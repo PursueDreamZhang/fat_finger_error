@@ -1,0 +1,15 @@
+{
+  "commodity": "AL",
+  "status": "success_no_events",
+  "started_at": "2026-07-19T11:06:16+0800",
+  "finished_at": "2026-07-19T11:14:24+0800",
+  "elapsed_seconds": 488.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "AL",
+  "event_replay_html": "AL/event_replay_AL.html",
+  "events_csv": "AL/tick_candidate_events.csv",
+  "log_file": "logs/AL.log",
+  "exit_code": 0,
+  "error": null
+}

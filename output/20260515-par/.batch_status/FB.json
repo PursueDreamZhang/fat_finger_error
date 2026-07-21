@@ -1,0 +1,15 @@
+{
+  "commodity": "FB",
+  "status": "success_no_events",
+  "started_at": "2026-07-17T21:25:12+0800",
+  "finished_at": "2026-07-17T21:25:23+0800",
+  "elapsed_seconds": 11.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "FB",
+  "event_replay_html": "FB/event_replay_FB.html",
+  "events_csv": "FB/tick_candidate_events.csv",
+  "log_file": "logs/FB.log",
+  "exit_code": 0,
+  "error": null
+}

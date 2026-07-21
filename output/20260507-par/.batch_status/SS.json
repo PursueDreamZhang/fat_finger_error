@@ -1,0 +1,15 @@
+{
+  "commodity": "SS",
+  "status": "success_no_events",
+  "started_at": "2026-07-18T01:10:13+0800",
+  "finished_at": "2026-07-18T01:14:18+0800",
+  "elapsed_seconds": 245.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "SS",
+  "event_replay_html": "SS/event_replay_SS.html",
+  "events_csv": "SS/tick_candidate_events.csv",
+  "log_file": "logs/SS.log",
+  "exit_code": 0,
+  "error": null
+}

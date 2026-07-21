@@ -1,0 +1,15 @@
+{
+  "commodity": "LC",
+  "status": "success_no_events",
+  "started_at": "2026-07-19T20:26:37+0800",
+  "finished_at": "2026-07-19T20:28:32+0800",
+  "elapsed_seconds": 115.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "LC",
+  "event_replay_html": "LC/event_replay_LC.html",
+  "events_csv": "LC/tick_candidate_events.csv",
+  "log_file": "logs/LC.log",
+  "exit_code": 0,
+  "error": null
+}

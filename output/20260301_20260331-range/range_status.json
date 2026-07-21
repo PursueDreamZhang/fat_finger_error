@@ -1,0 +1,585 @@
+{
+  "start_date": "20260301",
+  "end_date": "20260331",
+  "commodities": [
+    "SC",
+    "LU",
+    "FU",
+    "BU",
+    "PG",
+    "PX",
+    "TA",
+    "EG",
+    "EB",
+    "L",
+    "PP",
+    "BR"
+  ],
+  "counts": {
+    "total_days": 31,
+    "completed_days": 22,
+    "failed_days": 0,
+    "missing_days": 9,
+    "missing_output_days": 0,
+    "incomplete_days": 0,
+    "event_count": 490,
+    "hit_commodities": 12
+  },
+  "days": [
+    {
+      "day": "20260301",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260301-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260302",
+      "status": "complete",
+      "events": 2,
+      "hits": 2,
+      "hit_commodities": [
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 465.0,
+      "summary_path": "../20260302-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260303",
+      "status": "complete",
+      "events": 4,
+      "hits": 2,
+      "hit_commodities": [
+        "EB",
+        "PP"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 500.0,
+      "summary_path": "../20260303-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260304",
+      "status": "complete",
+      "events": 25,
+      "hits": 7,
+      "hit_commodities": [
+        "EB",
+        "FU",
+        "LU",
+        "PG",
+        "PP",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 484.0,
+      "summary_path": "../20260304-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260305",
+      "status": "complete",
+      "events": 38,
+      "hits": 7,
+      "hit_commodities": [
+        "BU",
+        "EB",
+        "FU",
+        "L",
+        "LU",
+        "PG",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 597.0,
+      "summary_path": "../20260305-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260306",
+      "status": "complete",
+      "events": 59,
+      "hits": 3,
+      "hit_commodities": [
+        "EB",
+        "PX",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 733.0,
+      "summary_path": "../20260306-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260307",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260307-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260308",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260308-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260309",
+      "status": "complete",
+      "events": 6,
+      "hits": 4,
+      "hit_commodities": [
+        "BU",
+        "FU",
+        "PG",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 250.0,
+      "summary_path": "../20260309-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260310",
+      "status": "complete",
+      "events": 76,
+      "hits": 8,
+      "hit_commodities": [
+        "EB",
+        "FU",
+        "L",
+        "PG",
+        "PP",
+        "PX",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 539.0,
+      "summary_path": "../20260310-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260311",
+      "status": "complete",
+      "events": 16,
+      "hits": 7,
+      "hit_commodities": [
+        "EB",
+        "FU",
+        "L",
+        "PP",
+        "PX",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 596.0,
+      "summary_path": "../20260311-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260312",
+      "status": "complete",
+      "events": 26,
+      "hits": 7,
+      "hit_commodities": [
+        "EB",
+        "EG",
+        "FU",
+        "L",
+        "LU",
+        "PP",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 511.0,
+      "summary_path": "../20260312-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260313",
+      "status": "complete",
+      "events": 16,
+      "hits": 6,
+      "hit_commodities": [
+        "EB",
+        "EG",
+        "FU",
+        "L",
+        "PX",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 517.0,
+      "summary_path": "../20260313-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260314",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260314-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260315",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260315-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260316",
+      "status": "complete",
+      "events": 11,
+      "hits": 3,
+      "hit_commodities": [
+        "EB",
+        "EG",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 541.0,
+      "summary_path": "../20260316-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260317",
+      "status": "complete",
+      "events": 3,
+      "hits": 3,
+      "hit_commodities": [
+        "FU",
+        "L",
+        "SC"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 536.0,
+      "summary_path": "../20260317-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260318",
+      "status": "complete",
+      "events": 1,
+      "hits": 1,
+      "hit_commodities": [
+        "L"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 515.0,
+      "summary_path": "../20260318-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260319",
+      "status": "complete",
+      "events": 15,
+      "hits": 5,
+      "hit_commodities": [
+        "BU",
+        "EB",
+        "PX",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 487.0,
+      "summary_path": "../20260319-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260320",
+      "status": "complete",
+      "events": 36,
+      "hits": 8,
+      "hit_commodities": [
+        "BR",
+        "EB",
+        "FU",
+        "L",
+        "PG",
+        "PX",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 505.0,
+      "summary_path": "../20260320-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260321",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260321-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260322",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260322-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260323",
+      "status": "complete",
+      "events": 71,
+      "hits": 6,
+      "hit_commodities": [
+        "BR",
+        "EB",
+        "L",
+        "LU",
+        "PG",
+        "PP"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 459.0,
+      "summary_path": "../20260323-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260324",
+      "status": "complete",
+      "events": 6,
+      "hits": 4,
+      "hit_commodities": [
+        "L",
+        "PG",
+        "PP",
+        "PX"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 514.0,
+      "summary_path": "../20260324-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260325",
+      "status": "complete",
+      "events": 53,
+      "hits": 6,
+      "hit_commodities": [
+        "BU",
+        "FU",
+        "PP",
+        "PX",
+        "SC",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 481.0,
+      "summary_path": "../20260325-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260326",
+      "status": "complete",
+      "events": 2,
+      "hits": 2,
+      "hit_commodities": [
+        "EG",
+        "FU"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 448.0,
+      "summary_path": "../20260326-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260327",
+      "status": "complete",
+      "events": 7,
+      "hits": 3,
+      "hit_commodities": [
+        "LU",
+        "PX",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 442.0,
+      "summary_path": "../20260327-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260328",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260328-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260329",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260329-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260330",
+      "status": "complete",
+      "events": 7,
+      "hits": 4,
+      "hit_commodities": [
+        "BU",
+        "LU",
+        "PX",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 454.0,
+      "summary_path": "../20260330-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260331",
+      "status": "complete",
+      "events": 10,
+      "hits": 5,
+      "hit_commodities": [
+        "EB",
+        "FU",
+        "LU",
+        "PP",
+        "TA"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 465.0,
+      "summary_path": "../20260331-par/batch_summary.html",
+      "error": null
+    }
+  ],
+  "commodity_summary": [
+    {
+      "commodity": "EB",
+      "events": 104,
+      "days": 13,
+      "contracts": 5,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "PX",
+      "events": 75,
+      "days": 12,
+      "contracts": 4,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "TA",
+      "events": 72,
+      "days": 12,
+      "contracts": 8,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "SC",
+      "events": 51,
+      "days": 13,
+      "contracts": 4,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "L",
+      "events": 47,
+      "days": 10,
+      "contracts": 2,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "PP",
+      "events": 40,
+      "days": 9,
+      "contracts": 2,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "PG",
+      "events": 34,
+      "days": 7,
+      "contracts": 4,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "FU",
+      "events": 30,
+      "days": 12,
+      "contracts": 6,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "LU",
+      "events": 21,
+      "days": 7,
+      "contracts": 3,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "EG",
+      "events": 7,
+      "days": 4,
+      "contracts": 2,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "BU",
+      "events": 6,
+      "days": 5,
+      "contracts": 4,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    },
+    {
+      "commodity": "BR",
+      "events": 3,
+      "days": 2,
+      "contracts": 1,
+      "top_reason": "visible_execution_drop",
+      "top_label": "trade_recovered_3s"
+    }
+  ]
+}

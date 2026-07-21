@@ -5,8 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from run_tick_detector import _build_diagnostics, _build_peer_raw_windows, parse_args, run_detection
-from src.tick_detector.report_html import _render_peer_blocks
+from run_tick_detector import _build_diagnostics, _build_peer_raw_windows, _build_replay_payload, parse_args, run_detection
+from src.tick_detector.report_html import _render_event_section, _render_peer_blocks
 
 
 def test_tick_day_path_is_required():
@@ -150,6 +150,24 @@ def test_diagnostics_reports_final_cumulative_volume():
         candidates_count=0,
     )
     assert diagnostic["day_total_volume"] == 25
+
+
+def test_replay_payload_and_summary_cards_include_daily_high_low():
+    event = pd.DataFrame([{"event_id": "AP610|09:00:01.000", "event_anchor_key": 1000}])
+    target_frame = pd.DataFrame({"market_time_key": [1000], "display_time": ["09:00:01.000"]})
+    payload: dict[str, dict[str, object]] = {}
+    _build_replay_payload(
+        event,
+        "AP610",
+        target_frame,
+        {"AP610": target_frame},
+        payload,
+        {"AP2610": (7356.0, 7455.0, 7471.0)},
+    )
+
+    section = _render_event_section(event.iloc[0].to_dict(), payload["AP610|09:00:01.000"])
+    assert "日线最高价" in section and ">7455<" in section
+    assert "日线最低价" in section and ">7356<" in section
 
 
 def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_path):

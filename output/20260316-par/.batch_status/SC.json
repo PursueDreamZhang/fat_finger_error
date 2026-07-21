@@ -1,0 +1,15 @@
+{
+  "commodity": "SC",
+  "status": "success_with_events",
+  "started_at": "2026-07-20T00:12:10+0800",
+  "finished_at": "2026-07-20T00:16:07+0800",
+  "elapsed_seconds": 237.0,
+  "event_count": 3,
+  "contract_count": 3,
+  "output_dir": "SC",
+  "event_replay_html": "SC/event_replay_SC.html",
+  "events_csv": "SC/tick_candidate_events.csv",
+  "log_file": "logs/SC.log",
+  "exit_code": 0,
+  "error": null
+}

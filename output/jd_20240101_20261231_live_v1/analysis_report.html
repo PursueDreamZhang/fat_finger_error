@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>乌龙指可疑日期分析报告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .overview { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+    .toolbar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
+    .toolbar input, .toolbar select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    .sortable { cursor: pointer; user-select: none; }
+    .muted { color: #666; font-size: 12px; }
+    .suspicious-row { cursor: pointer; }
+    .suspicious-row:hover { background: #fff8e8; }
+    .invalid-row { cursor: pointer; }
+    .invalid-row:hover { background: #f4f9ff; }
+    .record-detail-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 999; }
+    .record-detail-modal.open { display: flex; }
+    .record-detail-card { width: min(980px, 100%); max-height: 88vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,0.2); padding: 20px 22px; }
+    .record-detail-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .record-detail-title { font-size: 20px; font-weight: 700; }
+    .record-detail-close { border: 1px solid #ccc; background: #fff; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .detail-section { border: 1px solid #e5e5e5; border-radius: 10px; padding: 14px; }
+    .detail-section h3 { margin: 0 0 10px; font-size: 16px; }
+    .detail-list { display: grid; grid-template-columns: minmax(120px, 180px) 1fr; row-gap: 6px; column-gap: 12px; }
+    .detail-label { color: #555; }
+    .detail-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .detail-formula { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd; color: #444; line-height: 1.6; }
+    .detail-badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .detail-badge { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; background: #fafafa; }
+    .detail-badge.hit { background: #fff4d6; border-color: #f0c36d; color: #8a5a00; }
+    .detail-badge.invalid { background: #ffe7e7; border-color: #f3a2a2; color: #9d1c1c; }
+    .threshold-group { margin-top: 10px; }
+    .threshold-title { color: #555; font-size: 13px; margin-bottom: 6px; }
+    .threshold-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .threshold-chip { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 12px; background: #f4f4f4; color: #555; }
+    .threshold-chip.threshold-hit { background: #ffe8b3; color: #7a4b00; font-weight: 600; }
+    .invalid-explanation { margin-bottom: 16px; padding: 12px 14px; border-radius: 10px; background: #fff4f4; border: 1px solid #f1c0c0; color: #8a2020; line-height: 1.6; }
+    .peer-compare-table { width: 100%; margin-top: 10px; }
+    .peer-compare-table th, .peer-compare-table td { font-size: 12px; padding: 6px; }
+    .peer-target-row { background: #fff4d6; }
+  </style>
+</head>
+<body>
+  <h1>乌龙指可疑日期分析报告</h1>
+  <div class="overview">
+    <div class="card"><strong>分析品种</strong><div>JD</div></div>
+    <div class="card"><strong>分析区间</strong><div>20240101 - 20261231</div></div>
+    <div class="card"><strong>候选数量</strong><div>0</div></div>
+    <div class="card"><strong>无效样本数量</strong><div>0</div></div>
+  </div>
+
+  <h2>品种摘要</h2>
+  <table>
+    <thead><tr><th>品种</th><th>候选数量</th><th>可疑合约数</th><th>最高分</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>可疑日期</h2>
+  <div class="toolbar">
+    <label>品种筛选
+      <select id="commodityFilter">
+        <option value="">全部</option>
+        
+      </select>
+    </label>
+    <label>关键字
+      <input id="keywordFilter" type="text" placeholder="搜索合约/触发原因/参考合约">
+    </label>
+  </div>
+  <div class="muted">默认按分数从高到低排序，点击“分数”表头可切换升序/降序。点击行可查看完整计算链路。</div>
+  <table>
+    <thead><tr><th>品种</th><th>合约</th><th>日期</th><th id="scoreHeader" class="sortable">分数 ↓</th><th>等级</th><th>触发原因</th><th>主参考合约</th></tr></thead>
+    <tbody id="suspiciousTableBody"></tbody>
+  </table>
+
+  <h2>无效样本</h2>
+  <table>
+    <thead><tr><th>品种</th><th>合约</th><th>日期</th><th>样本状态</th><th>原因</th><th>主参考合约</th></tr></thead>
+    <tbody id="invalidTableBody"></tbody>
+  </table>
+  <div id="record-detail-modal" class="record-detail-modal" role="dialog" aria-modal="true" aria-labelledby="record-detail-title">
+    <div class="record-detail-card">
+      <div class="record-detail-header">
+        <div id="record-detail-title" class="record-detail-title">记录详情</div>
+        <button id="record-detail-close" class="record-detail-close" type="button">关闭</button>
+      </div>
+      <div id="record-detail-content"></div>
+    </div>
+  </div>
+  <script id="detailRecordsJson" type="application/json">[]</script>
+  <script>
+    const commodityFilter = document.getElementById('commodityFilter');
+    const keywordFilter = document.getElementById('keywordFilter');
+    const tbody = document.getElementById('suspiciousTableBody');
+    const invalidTbody = document.getElementById('invalidTableBody');
+    const scoreHeader = document.getElementById('scoreHeader');
+    const detailModal = document.getElementById('record-detail-modal');
+    const detailContent = document.getElementById('record-detail-content');
+    const detailTitle = document.getElementById('record-detail-title');
+    const detailCloseButton = document.getElementById('record-detail-close');
+    const detailRecords = JSON.parse(document.getElementById('detailRecordsJson').textContent || '[]');
+    const detailRecordMap = new Map(detailRecords.map(record => [record.detail_id, record]));
+    let scoreSortDirection = 'desc';
+
+    function formatNumber(value, digits = 2) {
+      if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      return Number(value).toFixed(digits);
+    }
+
+    function formatPercent(value, digits = 2) {
+      if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      return `${(Number(value) * 100).toFixed(digits)}%`;
+    }
+
+    function formatDate(value) {
+      if (value === null || value === undefined || value === '') {
+        return 'N/A';
+      }
+      return String(value).replace(' 00:00:00', '');
+    }
+
+    function renderKeyValueRows(items) {
+      return items.map(item => `
+        <div class="detail-label">${item.label}</div>
+        <div class="detail-value">${item.value}</div>
+      `).join('');
+    }
+
+    function sampleStatusLabel(value) {
+      const labels = {
+        valid: '有效样本',
+        invalid_basic_data: '基础数据无效',
+        invalid_low_liquidity: '低流动性无效',
+        invalid_lifecycle_edge: '生命周期边界无效',
+        invalid_insufficient_history: '历史样本不足',
+        invalid_insufficient_peer: '对照不足',
+      };
+      return labels[value] || String(value ?? 'N/A');
+    }
+
+    function hitLevel(value, q90, q95, q99) {
+      const numericValue = Number(value);
+      const threshold90 = Number(q90);
+      const threshold95 = Number(q95);
+      const threshold99 = Number(q99);
+      if (Number.isNaN(numericValue)) {
+        return 'none';
+      }
+      if (!Number.isNaN(threshold99) && threshold99 > 0 && numericValue >= threshold99) {
+        return 'P99';
+      }
+      if (!Number.isNaN(threshold95) && threshold95 > 0 && numericValue >= threshold95) {
+        return 'P95';
+      }
+      if (!Number.isNaN(threshold90) && threshold90 > 0 && numericValue >= threshold90) {
+        return 'P90';
+      }
+      return 'none';
+    }
+
+    function renderThresholdChips(value, q90, q95, q99, formatter) {
+      const level = hitLevel(value, q90, q95, q99);
+      return `
+        <div class="threshold-group">
+          <div class="threshold-title">阈值命中情况</div>
+          <div class="threshold-row">
+            <span class="threshold-chip ${level === 'P90' ? 'threshold-hit' : ''}">P90: ${formatter(q90)}</span>
+            <span class="threshold-chip ${level === 'P95' ? 'threshold-hit' : ''}">P95: ${formatter(q95)}</span>
+            <span class="threshold-chip ${level === 'P99' ? 'threshold-hit' : ''}">P99: ${formatter(q99)}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBadgeRow(badges) {
+      return `
+        <div class="detail-badge-row">
+          ${
+            badges.map(badge => `<span class="detail-badge ${badge.hit ? 'hit' : ''} ${badge.invalid ? 'invalid' : ''}">${badge.text}</span>`).join('')
+          }
+        </div>
+      `;
+    }
+
+    function renderPeerCompareTable(peerRows) {
+      if (!Array.isArray(peerRows) || peerRows.length === 0) {
+        return '<div class="muted">没有可展示的同日活跃合约对比数据。</div>';
+      }
+      const rows = peerRows.map(row => `
+        <tr class="${row.is_target ? 'peer-target-row' : ''}">
+          <td>${row.is_target ? '目标' : 'Peer'}</td>
+          <td>${escapeHtml(row.contract)}</td>
+          <td>${formatNumber(row.volume, 0)}</td>
+          <td>${formatNumber(row.high)}</td>
+          <td>${formatNumber(row.low)}</td>
+          <td>${formatNumber(row.close)}</td>
+          <td>${formatPercent(row.range_pct)}</td>
+          <td>${formatPercent(row.raw_structure_residual)}</td>
+          <td>${formatNumber(row.normalized_structure_residual, 4)}</td>
+          <td>${formatNumber(row.candidate_score)}</td>
+          <td>${escapeHtml(row.candidate_level)}</td>
+        </tr>
+      `).join('');
+      return `
+        <table class="peer-compare-table">
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>合约</th>
+              <th>成交量</th>
+              <th>最高</th>
+              <th>最低</th>
+              <th>收盘</th>
+              <th>振幅</th>
+              <th>原始残差</th>
+              <th>归一化残差</th>
+              <th>分数</th>
+              <th>等级</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    function showRecordDetail(detailId) {
+      const record = detailRecordMap.get(detailId);
+      if (!record) {
+        return;
+      }
+      const isInvalid = record.sample_status !== 'valid';
+      const rangeHit = hitLevel(record.range_pct, record.range_q90, record.range_q95, record.range_q99);
+      const extremeHit = hitLevel(record.extreme_pct, record.extreme_q90, record.extreme_q95, record.extreme_q99);
+      const structureHit = hitLevel(record.normalized_structure_residual, record.structure_q90, record.structure_q95, record.structure_q99);
+      const uniquenessHit = hitLevel(record.uniqueness_gap, record.uniqueness_q90, record.uniqueness_q95, record.uniqueness_q99);
+      detailTitle.textContent = `${record.contract} ${formatDate(record.trade_date)} 计算详情`;
+      detailContent.innerHTML = `
+        ${
+          isInvalid
+            ? `<div class="invalid-explanation">这条记录没有进入正式候选计算。当前样本状态是 <strong>${escapeHtml(sampleStatusLabel(record.sample_status))}</strong>，原因是：${escapeHtml(record.trigger_reasons || '无可用解释')}。</div>`
+            : ''
+        }
+        <div class="detail-grid">
+          <section class="detail-section">
+            <h3>基础数据</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '品种', value: escapeHtml(record.commodity) },
+                  { label: '合约', value: escapeHtml(record.contract) },
+                  { label: '日期', value: escapeHtml(formatDate(record.trade_date)) },
+                  { label: '开盘', value: formatNumber(record.open) },
+                  { label: '最高', value: formatNumber(record.high) },
+                  { label: '最低', value: formatNumber(record.low) },
+                  { label: '收盘', value: formatNumber(record.close) },
+                  { label: '昨收', value: formatNumber(record.pre_close) },
+                  { label: '成交量', value: formatNumber(record.volume, 0) },
+                  { label: '主参考合约', value: escapeHtml(record.main_reference_contract || 'N/A') },
+                ])
+              }
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>最终结论</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '样本状态', value: escapeHtml(sampleStatusLabel(record.sample_status)) },
+                  { label: '候选等级', value: escapeHtml(record.candidate_level) },
+                  { label: '总分', value: formatNumber(record.candidate_score) },
+                  { label: 'A 分', value: formatNumber(record.A_score) },
+                  { label: 'C 分', value: formatNumber(record.C_score) },
+                  { label: 'E 分', value: formatNumber(record.E_score) },
+                  { label: '触发原因', value: escapeHtml(record.trigger_reasons) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `A=${formatNumber(record.A_score)}`, hit: Number(record.A_score) > 0 },
+                { text: `C=${formatNumber(record.C_score)}`, hit: Number(record.C_score) > 0 },
+                { text: `E=${formatNumber(record.E_score)}`, hit: Number(record.E_score) < 0, invalid: Number(record.E_score) < 0 },
+              ])
+            }
+          </section>
+          <section class="detail-section">
+            <h3>同日基线</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '活跃可比合约数', value: formatNumber(record.active_peer_count, 0) },
+                  { label: 'peer_high_median', value: formatNumber(record.peer_high_median) },
+                  { label: 'peer_low_median', value: formatNumber(record.peer_low_median) },
+                  { label: 'peer_volume_median', value: formatNumber(record.peer_volume_median, 0) },
+                  { label: 'peer_range_median', value: formatPercent(record.peer_range_median) },
+                  { label: '可比性偏弱', value: record.peer_comparability_weak_flag ? '是' : '否' },
+                  { label: '目标流动性偏弱', value: record.target_liquidity_weak_flag ? '是' : '否' },
+                ])
+              }
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>A 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'range_pct', value: formatPercent(record.range_pct) },
+                  { label: 'range_q90/q95/q99', value: `${formatPercent(record.range_q90)} / ${formatPercent(record.range_q95)} / ${formatPercent(record.range_q99)}` },
+                  { label: 'A1', value: formatNumber(record.A1_score) },
+                  { label: 'extreme_pct', value: formatPercent(record.extreme_pct) },
+                  { label: 'extreme_q90/q95/q99', value: `${formatPercent(record.extreme_q90)} / ${formatPercent(record.extreme_q95)} / ${formatPercent(record.extreme_q99)}` },
+                  { label: 'A2', value: formatNumber(record.A2_score) },
+                  { label: 'A 总分', value: formatNumber(record.A_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `range命中=${rangeHit}`, hit: rangeHit !== 'none' },
+                { text: `extreme命中=${extremeHit}`, hit: extremeHit !== 'none' },
+              ])
+            }
+            ${
+              renderThresholdChips(record.range_pct, record.range_q90, record.range_q95, record.range_q99, value => formatPercent(value))
+            }
+            ${
+              renderThresholdChips(record.extreme_pct, record.extreme_q90, record.extreme_q95, record.extreme_q99, value => formatPercent(value))
+            }
+            <div class="detail-formula">
+              A = A1 + A2，其中 A1 看振幅是否超过历史分位阈值，A2 看盘中极值是否超过历史分位阈值。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>C 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'raw_structure_residual', value: formatPercent(record.raw_structure_residual) },
+                  { label: 'excess_structure_residual', value: formatPercent(record.excess_structure_residual) },
+                  { label: 'normalized_structure_residual', value: formatNumber(record.normalized_structure_residual, 4) },
+                  { label: 'structure_q90/q95/q99', value: `${formatNumber(record.structure_q90, 4)} / ${formatNumber(record.structure_q95, 4)} / ${formatNumber(record.structure_q99, 4)}` },
+                  { label: 'C1', value: formatNumber(record.C1_score) },
+                  { label: 'raw_uniqueness_gap', value: formatNumber(record.raw_uniqueness_gap, 4) },
+                  { label: 'uniqueness_gap', value: formatNumber(record.uniqueness_gap, 4) },
+                  { label: 'uniqueness_q90/q95/q99', value: `${formatNumber(record.uniqueness_q90, 4)} / ${formatNumber(record.uniqueness_q95, 4)} / ${formatNumber(record.uniqueness_q99, 4)}` },
+                  { label: 'C2', value: formatNumber(record.C2_score) },
+                  { label: 'C 总分', value: formatNumber(record.C_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `structure命中=${structureHit}`, hit: structureHit !== 'none' },
+                { text: `uniqueness命中=${uniquenessHit}`, hit: uniquenessHit !== 'none' },
+              ])
+            }
+            ${
+              renderThresholdChips(record.normalized_structure_residual, record.structure_q90, record.structure_q95, record.structure_q99, value => formatNumber(value, 4))
+            }
+            ${
+              renderThresholdChips(record.uniqueness_gap, record.uniqueness_q90, record.uniqueness_q95, record.uniqueness_q99, value => formatNumber(value, 4))
+            }
+            <div class="detail-formula">
+              C1 先看相对同日活跃合约基线的结构偏离，再扣掉同日正常波动带并归一化；C2 再看这种偏离在同日横截面里是不是特别突出。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>E 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'sample_status', value: escapeHtml(sampleStatusLabel(record.sample_status)) },
+                  { label: 'active_peer_count', value: formatNumber(record.active_peer_count, 0) },
+                  { label: 'peer_comparability_weak_flag', value: record.peer_comparability_weak_flag ? 'True' : 'False' },
+                  { label: 'target_liquidity_weak_flag', value: record.target_liquidity_weak_flag ? 'True' : 'False' },
+                  { label: 'E', value: formatNumber(record.E_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `sample_status=${escapeHtml(sampleStatusLabel(record.sample_status))}`, invalid: isInvalid },
+                { text: `peer_count=${formatNumber(record.active_peer_count, 0)}`, hit: Number(record.active_peer_count) >= 1 },
+                { text: `peer弱=${record.peer_comparability_weak_flag ? '是' : '否'}`, invalid: !!record.peer_comparability_weak_flag },
+                { text: `volume弱=${record.target_liquidity_weak_flag ? '是' : '否'}`, invalid: !!record.target_liquidity_weak_flag },
+              ])
+            }
+            <div class="detail-formula">
+              E 只做可信度惩罚：无效样本或无可比合约时直接给 -20；只有 1 个可比合约或可比性偏弱时给更轻的惩罚。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>同日活跃合约对比</h3>
+            ${
+              renderPeerCompareTable(record.peer_rows)
+            }
+            <div class="detail-formula">
+              这张表展示同日活跃合约横截面。目标合约会高亮，你可以直接对比它和其他活跃合约在最高价、最低价、振幅、结构残差上的差异。
+            </div>
+          </section>
+        </div>
+      `;
+      detailModal.classList.add('open');
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? 'N/A')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function closeRecordDetail() {
+      detailModal.classList.remove('open');
+    }
+
+    function sortRowsByScore(direction) {
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      rows.sort((a, b) => {
+        const scoreA = parseFloat(a.querySelector('[data-col="score"]').textContent) || 0;
+        const scoreB = parseFloat(b.querySelector('[data-col="score"]').textContent) || 0;
+        return direction === 'desc' ? scoreB - scoreA : scoreA - scoreB;
+      });
+      for (const row of rows) {
+        tbody.appendChild(row);
+      }
+      scoreHeader.textContent = direction === 'desc' ? '分数 ↓' : '分数 ↑';
+    }
+
+    function applyFilters() {
+      const commodity = commodityFilter.value.trim();
+      const keyword = keywordFilter.value.trim().toLowerCase();
+      for (const row of [tbody, invalidTbody].flatMap(section => Array.from(section.querySelectorAll('tr')))) {
+        const cells = Array.from(row.querySelectorAll('td'));
+        const commodityValue = row.querySelector('[data-col="commodity"]').textContent.trim();
+        const rowText = cells.map(cell => cell.textContent).join(' ').toLowerCase();
+        const matchedCommodity = !commodity || commodityValue === commodity;
+        const matchedKeyword = !keyword || rowText.includes(keyword);
+        row.style.display = matchedCommodity && matchedKeyword ? '' : 'none';
+      }
+    }
+
+    commodityFilter.addEventListener('change', applyFilters);
+    keywordFilter.addEventListener('input', applyFilters);
+    scoreHeader.addEventListener('click', () => {
+      scoreSortDirection = scoreSortDirection === 'desc' ? 'asc' : 'desc';
+      sortRowsByScore(scoreSortDirection);
+      applyFilters();
+    });
+    tbody.addEventListener('click', event => {
+      const row = event.target.closest('tr[data-detail-id]');
+      if (!row) {
+        return;
+      }
+      showRecordDetail(row.dataset.detailId);
+    });
+    invalidTbody.addEventListener('click', event => {
+      const row = event.target.closest('tr[data-detail-id]');
+      if (!row) {
+        return;
+      }
+      showRecordDetail(row.dataset.detailId);
+    });
+    detailCloseButton.addEventListener('click', closeRecordDetail);
+    detailModal.addEventListener('click', event => {
+      if (event.target === detailModal) {
+        closeRecordDetail();
+      }
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && detailModal.classList.contains('open')) {
+        closeRecordDetail();
+      }
+    });
+    sortRowsByScore(scoreSortDirection);
+  </script>
+</body>
+</html>

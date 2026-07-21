@@ -1,0 +1,15 @@
+{
+  "commodity": "SI",
+  "status": "success_no_events",
+  "started_at": "2026-07-19T20:56:04+0800",
+  "finished_at": "2026-07-19T20:56:43+0800",
+  "elapsed_seconds": 39.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "SI",
+  "event_replay_html": "SI/event_replay_SI.html",
+  "events_csv": "SI/tick_candidate_events.csv",
+  "log_file": "logs/SI.log",
+  "exit_code": 0,
+  "error": null
+}

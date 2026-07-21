@@ -1,0 +1,35 @@
+<html><head><meta charset='utf-8'><title>聚合 Tick 乌龙指候选事件复盘</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif; margin: 24px; color: #1f2937; background: #f8fafc; }
+      h1, h2, h3, h4 { color: #111827; }
+      .page-note { color: #4b5563; }
+      .event-section { margin-top: 28px; padding: 20px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px; }
+      .event-summary-row:hover td { background: #e0f2fe; }
+      .detail-cell { white-space: nowrap; }
+      .detail-link { display: inline-block; background: #0f766e; color: #ffffff; border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 600; text-decoration: none; }
+      .detail-link:hover { background: #115e59; }
+      .modal-shell { position: fixed; inset: 0; z-index: 1000; display: none; align-items: flex-start; justify-content: center; padding: 32px 20px; overflow-y: auto; }
+      .modal-shell:target { display: flex; }
+      .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); }
+      .modal-panel { position: relative; width: min(1200px, 100%); margin-top: 0; box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22); z-index: 1; }
+      .modal-topbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+      .modal-close { display: inline-block; background: #111827; color: #ffffff; border-radius: 999px; padding: 8px 14px; font-size: 12px; text-decoration: none; }
+      .modal-close:hover { background: #1f2937; }
+      .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 12px 0 16px; }
+      .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; }
+      .card-label { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+      .card-value { font-size: 18px; font-weight: 700; color: #111827; word-break: break-word; }
+      .diagnostics th { background: #fef3c7; }
+      .diagnostics tr.unvalidated td { background: #fee2e2; }
+      table { width: 100%; border-collapse: collapse; background: white; margin: 10px 0 18px; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; text-align: left; vertical-align: top; }
+      th { background: #f3f4f6; position: sticky; top: 0; }
+      .anchor-row td { background: #fee2e2; font-weight: 700; }
+      .empty { padding: 16px; background: white; border-radius: 12px; border: 1px solid #e5e7eb; }
+      .section-note { color: #6b7280; margin: 6px 0 10px; }
+      @media (max-width: 720px) {
+        .modal-shell { padding: 12px; }
+        .modal-panel { padding: 14px; }
+      }
+    </style>
+    </head><body><div id='page-top'></div><h1>聚合 Tick 乌龙指候选事件复盘</h1><p class='page-note'>聚合快照无法还原逐笔最低价。所有输出均为「疑似候选」，不宣称已确认交易所错单。</p><h2>合约运行诊断</h2><table class='diagnostics'><thead><tr><th>合约</th><th>参数档</th><th>验证状态</th><th>原始行数</th><th>同时间键合并后行数</th><th>可检测行数</th><th>元数据阻断行数</th><th>交易时段阻断行数</th><th>参考合约阻断行数</th><th>历史噪声不足行数</th><th>计数器同步未确认行数</th><th>计数器错位嫌疑行数</th><th>候选事件数</th></tr></thead><tbody><tr class=''><td>NR2606</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>19498</td><td>19498</td><td>19489</td><td>0</td><td>9</td><td>293</td><td>17064</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2607</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>39862</td><td>39862</td><td>39853</td><td>0</td><td>9</td><td>409</td><td>7320</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2608</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>38181</td><td>38181</td><td>38173</td><td>0</td><td>8</td><td>375</td><td>29553</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2609</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>39384</td><td>39384</td><td>39377</td><td>0</td><td>7</td><td>344</td><td>38270</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2610</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>13609</td><td>13609</td><td>13602</td><td>0</td><td>7</td><td>228</td><td>13381</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2611</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>8807</td><td>8807</td><td>8800</td><td>0</td><td>7</td><td>271</td><td>8536</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2612</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>6332</td><td>6332</td><td>6324</td><td>0</td><td>8</td><td>240</td><td>6092</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2701</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>16173</td><td>16173</td><td>16166</td><td>0</td><td>7</td><td>196</td><td>15695</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2702</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>9333</td><td>9333</td><td>9326</td><td>0</td><td>7</td><td>315</td><td>9018</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2703</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>8282</td><td>8282</td><td>8276</td><td>0</td><td>6</td><td>316</td><td>7966</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2704</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>5023</td><td>5023</td><td>5016</td><td>0</td><td>7</td><td>311</td><td>4712</td><td>0</td><td>0</td><td>0</td></tr><tr class=''><td>NR2705</td><td>AUTO_INFERRED_V1</td><td>validated</td><td>6400</td><td>6400</td><td>6393</td><td>0</td><td>7</td><td>254</td><td>6146</td><td>0</td><td>0</td><td>0</td></tr></tbody></table><div class="empty">当前没有检测到疑似乌龙指候选事件。可结合上方诊断表判断是「确实无事件」还是「整条检测链被阻断」。</div></body></html>

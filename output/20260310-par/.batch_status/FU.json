@@ -1,0 +1,15 @@
+{
+  "commodity": "FU",
+  "status": "success_with_events",
+  "started_at": "2026-07-19T23:31:03+0800",
+  "finished_at": "2026-07-19T23:36:47+0800",
+  "elapsed_seconds": 344.0,
+  "event_count": 9,
+  "contract_count": 6,
+  "output_dir": "FU",
+  "event_replay_html": "FU/event_replay_FU.html",
+  "events_csv": "FU/tick_candidate_events.csv",
+  "log_file": "logs/FU.log",
+  "exit_code": 0,
+  "error": null
+}

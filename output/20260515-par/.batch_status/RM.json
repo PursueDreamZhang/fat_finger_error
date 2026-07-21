@@ -1,0 +1,15 @@
+{
+  "commodity": "RM",
+  "status": "success_no_events",
+  "started_at": "2026-07-17T21:35:40+0800",
+  "finished_at": "2026-07-17T21:36:32+0800",
+  "elapsed_seconds": 52.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "RM",
+  "event_replay_html": "RM/event_replay_RM.html",
+  "events_csv": "RM/tick_candidate_events.csv",
+  "log_file": "logs/RM.log",
+  "exit_code": 0,
+  "error": null
+}

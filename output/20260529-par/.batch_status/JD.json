@@ -1,0 +1,15 @@
+{
+  "commodity": "JD",
+  "status": "success_with_events",
+  "started_at": "2026-07-19T20:23:38+0800",
+  "finished_at": "2026-07-19T20:26:05+0800",
+  "elapsed_seconds": 147.0,
+  "event_count": 1,
+  "contract_count": 1,
+  "output_dir": "JD",
+  "event_replay_html": "JD/event_replay_JD.html",
+  "events_csv": "JD/tick_candidate_events.csv",
+  "log_file": "logs/JD.log",
+  "exit_code": 0,
+  "error": null
+}

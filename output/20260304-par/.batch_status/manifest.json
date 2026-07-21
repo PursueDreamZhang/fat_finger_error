@@ -1,0 +1,9 @@
+{
+  "tick_day_path": "data/tick2026/202603/20260304.zip",
+  "trade_day": "20260304",
+  "started_at": "2026-07-20T16:38:37+0800",
+  "commodities": [
+    "EB",
+    "PP"
+  ]
+}

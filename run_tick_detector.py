@@ -25,6 +25,7 @@ from src.tick_detector.tick_io import (
     iter_day_contract_files,
     load_contract_snapshots,
     load_daily_bounds,
+    normalize_contract_code,
     prepare_contract_snapshots,
 )
 
@@ -219,7 +220,7 @@ def run_detection(
             if events is not None and not events.empty:
                 all_events.append(events)
                 commodity_events.append(events)
-                _build_replay_payload(events, target_code, marked, day_frames, commodity_payload)
+                _build_replay_payload(events, target_code, marked, day_frames, commodity_payload, daily_bounds)
 
         commodity_events_df = _build_events_df(commodity_events)
         if commodity_events_df.empty and only_with_events:
@@ -503,6 +504,7 @@ def _build_replay_payload(
     target_frame: pd.DataFrame,
     day_frames: dict[str, pd.DataFrame],
     replay_payload: dict[str, dict[str, object]],
+    daily_bounds: dict[str, tuple[float, float, float]] | None,
 ) -> None:
     """为每个事件构建 [锚点前10秒, 锚点后10秒] 同窗口 replay payload。
 
@@ -510,6 +512,7 @@ def _build_replay_payload(
     这样目标检测明细能展示检测派生列；参考合约窗口仍取 day_frames 的原始帧。
     """
     target_df = target_frame
+    daily_bound = (daily_bounds or {}).get(normalize_contract_code(target_code))
     for _, event in events.iterrows():
         event_id = str(event["event_id"])
         anchor_key = int(event["event_anchor_key"])
@@ -526,6 +529,8 @@ def _build_replay_payload(
         replay_payload[event_id] = {
             "target_detail": target_detail,
             "peer_windows": peer_windows,
+            "daily_low": daily_bound[0] if daily_bound else None,
+            "daily_high": daily_bound[1] if daily_bound else None,
         }
 
 

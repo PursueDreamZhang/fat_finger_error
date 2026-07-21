@@ -1,0 +1,15 @@
+{
+  "commodity": "CU",
+  "status": "success_no_events",
+  "started_at": "2026-07-18T00:14:16+0800",
+  "finished_at": "2026-07-18T00:20:03+0800",
+  "elapsed_seconds": 347.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "CU",
+  "event_replay_html": "CU/event_replay_CU.html",
+  "events_csv": "CU/tick_candidate_events.csv",
+  "log_file": "logs/CU.log",
+  "exit_code": 0,
+  "error": null
+}

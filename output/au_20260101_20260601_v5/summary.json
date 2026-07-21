@@ -1,0 +1,328 @@
+{
+  "overview": {
+    "symbols": [
+      "AU"
+    ],
+    "start_date": "20260101",
+    "end_date": "20260601",
+    "candidate_count": 17
+  },
+  "commodity_summary": [
+    {
+      "commodity": "AU",
+      "candidate_count": 17,
+      "contract_count": 8,
+      "max_candidate_score": 65.0
+    }
+  ],
+  "suspicious_dates": [
+    {
+      "commodity": "AU",
+      "contract": "AU2602",
+      "trade_date": "2026-01-12 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2602"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-26 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-27 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-28 00:00:00",
+      "candidate_score": 43.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-29 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 60.0,
+      "candidate_level": "medium",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2606",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 60.0,
+      "candidate_level": "medium",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-03-12 00:00:00",
+      "candidate_score": 46.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真；邻近参考不足；样本状态=invalid_lifecycle_edge",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-03-12 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2608",
+      "trade_date": "2026-03-20 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2610",
+      "trade_date": "2026-03-20 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2606",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 65.0,
+      "candidate_level": "high",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真；邻近参考不足",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2608",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2702",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 48.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2610",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 45.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2612",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2606"
+    }
+  ],
+  "detail_records": [
+    {
+      "commodity": "AU",
+      "contract": "AU2602",
+      "trade_date": "2026-01-12 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2602"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-26 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-27 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-28 00:00:00",
+      "candidate_score": 43.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-29 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 60.0,
+      "candidate_level": "medium",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2606",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 60.0,
+      "candidate_level": "medium",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-01-30 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2603",
+      "trade_date": "2026-03-12 00:00:00",
+      "candidate_score": 46.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真；邻近参考不足；样本状态=invalid_lifecycle_edge",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2604",
+      "trade_date": "2026-03-12 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2608",
+      "trade_date": "2026-03-20 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2610",
+      "trade_date": "2026-03-20 00:00:00",
+      "candidate_score": 41.0,
+      "candidate_level": "low",
+      "trigger_reasons": "振幅异常；回归迹象明显",
+      "main_reference_contract": "AU2604"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2606",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 65.0,
+      "candidate_level": "high",
+      "trigger_reasons": "振幅异常；回归迹象明显；结构失真；邻近参考不足",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2608",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 51.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2702",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 48.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2610",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 45.0,
+      "candidate_level": "low",
+      "trigger_reasons": "回归迹象明显；结构失真",
+      "main_reference_contract": "AU2606"
+    },
+    {
+      "commodity": "AU",
+      "contract": "AU2612",
+      "trade_date": "2026-05-20 00:00:00",
+      "candidate_score": 40.0,
+      "candidate_level": "low",
+      "trigger_reasons": "结构失真",
+      "main_reference_contract": "AU2606"
+    }
+  ]
+}

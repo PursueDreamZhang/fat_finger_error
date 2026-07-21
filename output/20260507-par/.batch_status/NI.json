@@ -1,0 +1,15 @@
+{
+  "commodity": "NI",
+  "status": "success_with_events",
+  "started_at": "2026-07-18T00:40:32+0800",
+  "finished_at": "2026-07-18T00:48:09+0800",
+  "elapsed_seconds": 457.0,
+  "event_count": 1,
+  "contract_count": 1,
+  "output_dir": "NI",
+  "event_replay_html": "NI/event_replay_NI.html",
+  "events_csv": "NI/tick_candidate_events.csv",
+  "log_file": "logs/NI.log",
+  "exit_code": 0,
+  "error": null
+}

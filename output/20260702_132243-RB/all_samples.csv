@@ -1,0 +1,13 @@
+﻿detail_id,commodity,contract,trade_date,candidate_score,candidate_level,sample_status,trigger_reasons,main_reference_contract
+RB|RB2503|2025-02-05,RB,RB2503,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2505|2025-02-05,RB,RB2505,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2506|2025-02-05,RB,RB2506,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2507|2025-02-05,RB,RB2507,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2508|2025-02-05,RB,RB2508,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2510|2025-02-05,RB,RB2510,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2511|2025-02-05,RB,RB2511,2025-02-05,20.0,none,valid,振幅异常,RB2505
+RB|RB2504|2025-02-05,RB,RB2504,2025-02-05,13.0,none,valid,振幅异常,RB2505
+RB|RB2509|2025-02-05,RB,RB2509,2025-02-05,13.0,none,valid,振幅异常,RB2505
+RB|RB2502|2025-02-05,RB,RB2502,2025-02-05,0.0,none,valid,目标合约流动性偏弱,RB2505
+RB|RB2512|2025-02-05,RB,RB2512,2025-02-05,0.0,none,valid,无明显触发项,RB2505
+RB|RB2601|2025-02-05,RB,RB2601,2025-02-05,0.0,none,invalid_insufficient_history,样本状态=历史样本不足,RB2505

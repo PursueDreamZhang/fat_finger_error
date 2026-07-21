@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>乌龙指可疑日期分析报告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .overview { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+    .toolbar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
+    .toolbar input, .toolbar select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    .sortable { cursor: pointer; user-select: none; }
+    .muted { color: #666; font-size: 12px; }
+    .suspicious-row { cursor: pointer; }
+    .suspicious-row:hover { background: #fff8e8; }
+    .invalid-row { cursor: pointer; }
+    .invalid-row:hover { background: #f4f9ff; }
+    .record-detail-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 999; }
+    .record-detail-modal.open { display: flex; }
+    .record-detail-card { width: min(980px, 100%); max-height: 88vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,0.2); padding: 20px 22px; }
+    .record-detail-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .record-detail-title { font-size: 20px; font-weight: 700; }
+    .record-detail-close { border: 1px solid #ccc; background: #fff; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .detail-section { border: 1px solid #e5e5e5; border-radius: 10px; padding: 14px; }
+    .detail-section h3 { margin: 0 0 10px; font-size: 16px; }
+    .detail-list { display: grid; grid-template-columns: minmax(120px, 180px) 1fr; row-gap: 6px; column-gap: 12px; }
+    .detail-label { color: #555; }
+    .detail-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .detail-formula { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd; color: #444; line-height: 1.6; }
+    .detail-badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .detail-badge { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; background: #fafafa; }
+    .detail-badge.hit { background: #fff4d6; border-color: #f0c36d; color: #8a5a00; }
+    .detail-badge.invalid { background: #ffe7e7; border-color: #f3a2a2; color: #9d1c1c; }
+    .threshold-group { margin-top: 10px; }
+    .threshold-title { color: #555; font-size: 13px; margin-bottom: 6px; }
+    .threshold-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .threshold-chip { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 12px; background: #f4f4f4; color: #555; }
+    .threshold-chip.threshold-hit { background: #ffe8b3; color: #7a4b00; font-weight: 600; }
+    .invalid-explanation { margin-bottom: 16px; padding: 12px 14px; border-radius: 10px; background: #fff4f4; border: 1px solid #f1c0c0; color: #8a2020; line-height: 1.6; }
+    .peer-compare-table { width: 100%; margin-top: 10px; }
+    .peer-compare-table th, .peer-compare-table td { font-size: 12px; padding: 6px; }
+    .peer-target-row { background: #fff4d6; }
+    .summary-grid { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; margin: 12px 0 18px; }
+    .summary-card { border: 1px solid #e5e5e5; border-radius: 10px; padding: 12px; background: #fafafa; }
+    .summary-card strong { display: block; margin-bottom: 6px; }
+    .summary-card .metric { font-size: 22px; font-weight: 700; }
+    .summary-card .submetric { color: #555; font-size: 12px; margin-top: 6px; line-height: 1.5; }
+    .bucket-grid { display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .bucket-card { border: 1px solid #e5e5e5; border-radius: 10px; padding: 12px; }
+    .bucket-card h3 { margin: 0 0 10px; font-size: 16px; }
+    .bucket-card table { margin-bottom: 0; }
+    .bucket-card .muted { margin-top: 6px; display: block; }
+    .stats-table th, .stats-table td { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>乌龙指可疑日期分析报告</h1>
+  <div class="overview">
+    <div class="card"><strong>分析品种</strong><div>RB</div></div>
+    <div class="card"><strong>分析区间</strong><div>20250201 - 20250205</div></div>
+    <div class="card"><strong>候选数量</strong><div>0</div></div>
+    <div class="card"><strong>无效样本数量</strong><div>1</div></div>
+  </div>
+
+  <h2>振幅横向统计</h2>
+  <div class="muted">只统计“可疑日期”里触发了“振幅异常”的记录，并和同日活跃合约基线做横向比较：最高点高出多少、最低点低出多少、振幅高出或低出多少。每 5% 分档。</div>
+  <div id="amplitudePeerSummary" class="summary-grid"></div>
+  <div id="amplitudePeerBuckets" class="bucket-grid"></div>
+
+  <h2>交割月差统计</h2>
+  <div class="muted">对每条可疑日期，比较目标合约和同日成交量最大的主参考合约，统计两者交割月相差几个月。例：`BU2603` 对比 `BU2509`，月差为 `6`。</div>
+  <div id="contractGapSummary" class="summary-grid"></div>
+  <div class="bucket-grid">
+    <div class="bucket-card">
+      <h3>交割月差分布</h3>
+      <table class="stats-table">
+        <thead><tr><th>月差</th><th>数量</th></tr></thead>
+        <tbody id="contractGapBucketBody"></tbody>
+      </table>
+    </div>
+    <div class="bucket-card" style="grid-column: span 2;">
+      <h3>按品种汇总</h3>
+      <table class="stats-table">
+        <thead><tr><th>品种</th><th>可疑记录数</th><th>P50 月差</th><th>P90 月差</th><th>最大月差</th></tr></thead>
+        <tbody id="contractGapCommodityBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>品种摘要</h2>
+  <table>
+    <thead><tr><th>品种</th><th>候选数量</th><th>可疑合约数</th><th>最高分</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>可疑日期</h2>
+  <div class="toolbar">
+    <label>品种筛选
+      <select id="commodityFilter">
+        <option value="">全部</option>
+        
+      </select>
+    </label>
+    <label>关键字
+      <input id="keywordFilter" type="text" placeholder="搜索合约/触发原因/参考合约">
+    </label>
+  </div>
+  <div class="muted">默认按分数从高到低排序，点击“分数”表头可切换升序/降序。点击行可查看完整计算链路。</div>
+  <table>
+    <thead><tr><th id="commodityHeader" class="sortable">品种</th><th>合约</th><th id="tradeDateHeader" class="sortable">日期</th><th id="scoreHeader" class="sortable">分数 ↓</th><th>等级</th><th>触发原因</th><th>主参考合约</th></tr></thead>
+    <tbody id="suspiciousTableBody"></tbody>
+  </table>
+
+  <h2>无效样本</h2>
+  <table>
+    <thead><tr><th>品种</th><th>合约</th><th>日期</th><th>样本状态</th><th>原因</th><th>主参考合约</th></tr></thead>
+    <tbody id="invalidTableBody"><tr class='invalid-row' data-detail-id="RB|RB2601|2025-02-05"><td data-col='commodity'>RB</td><td>RB2601</td><td>2025-02-05</td><td>历史样本不足</td><td>样本状态=历史样本不足</td><td>RB2505</td></tr></tbody>
+  </table>
+  <div id="record-detail-modal" class="record-detail-modal" role="dialog" aria-modal="true" aria-labelledby="record-detail-title">
+    <div class="record-detail-card">
+      <div class="record-detail-header">
+        <div id="record-detail-title" class="record-detail-title">记录详情</div>
+        <button id="record-detail-close" class="record-detail-close" type="button">关闭</button>
+      </div>
+      <div id="record-detail-content"></div>
+    </div>
+  </div>
+  <script id="detailRecordsJson" type="application/json">[{"detail_id": "RB|RB2503|2025-02-05", "commodity": "RB", "contract": "RB2503", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3332.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "pre_close": 3306.0, "volume": 19223.0, "range_pct": 0.027624309392265192, "extreme_pct": 0.022713321055862493, "range_q90": 0.015071204523315486, "range_q95": 0.016503987627308297, "range_q99": 0.017688394424686463, "extreme_q90": 0.013990846500806661, "extreme_q95": 0.014661939006050928, "extreme_q99": 0.015831612607411734, "raw_structure_residual": 0.02992633517495396, "excess_structure_residual": 0.00336937713897259, "normalized_structure_residual": 0.12687361008770295, "structure_q90": 1.0899018534897942, "structure_q95": 1.2751612667533996, "structure_q99": 1.632708800919723, "raw_uniqueness_gap": 0.12687361008770295, "uniqueness_gap": 0.12687361008770295, "uniqueness_q90": 1.0899018534897942, "uniqueness_q95": 1.2751612667533996, "uniqueness_q99": 1.632708800919723, "active_peer_count": 4, "peer_high_median": 3426.0, "peer_low_median": 3339.5, "peer_volume_median": 43841.5, "peer_range_median": 0.02655695803598137, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": true, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2505|2025-02-05", "commodity": "RB", "contract": "RB2505", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3395.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "pre_close": 3382.0, "volume": 1169030.0, "range_pct": 0.027409638554216867, "extreme_pct": 0.023493975903614458, "range_q90": 0.01603649817605632, "range_q95": 0.01648021241746818, "range_q99": 0.018005413776494818, "extreme_q90": 0.013432583265827469, "extreme_q95": 0.014572832548419965, "extreme_q99": 0.016200450258201188, "raw_structure_residual": 0.009789156626506024, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.0, "structure_q99": 0.0, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.0, "uniqueness_q99": 0.0, "active_peer_count": 4, "peer_high_median": 3426.0, "peer_low_median": 3339.5, "peer_volume_median": 21439.5, "peer_range_median": 0.02655695803598137, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2506|2025-02-05", "commodity": "RB", "contract": "RB2506", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3390.0, "high": 3400.0, "low": 3318.0, "close": 3330.0, "pre_close": 3385.0, "volume": 702.0, "range_pct": 0.024624624624624624, "extreme_pct": 0.021021021021021023, "range_q90": 0.015739281590325782, "range_q95": 0.016008204826768326, "range_q99": 0.016752611091624067, "extreme_q90": 0.01343537681960468, "extreme_q95": 0.01431055549713317, "extreme_q99": 0.014749183907747584, "raw_structure_residual": 0.003903903903903904, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.0, "structure_q99": 0.0, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.0, "uniqueness_q99": 0.0, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2506", "volume": 702.0, "high": 3400.0, "low": 3318.0, "close": 3330.0, "range_pct": 0.024624624624624624, "raw_structure_residual": 0.003903903903903904, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2507|2025-02-05", "commodity": "RB", "contract": "RB2507", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3422.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "pre_close": 3405.0, "volume": 64027.0, "range_pct": 0.027221058929105594, "extreme_pct": 0.02363146874065211, "range_q90": 0.01733909232080525, "range_q95": 0.01793296606663359, "range_q99": 0.01908765285607573, "extreme_q90": 0.016694373126624945, "extreme_q95": 0.016854251999546238, "extreme_q99": 0.01712583965382389, "raw_structure_residual": 0.0023930601256356566, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.0, "structure_q99": 0.0, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.0, "uniqueness_q99": 0.0, "active_peer_count": 4, "peer_high_median": 3414.0, "peer_low_median": 3327.5, "peer_volume_median": 21439.5, "peer_range_median": 0.026651247848537007, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": true, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2508|2025-02-05", "commodity": "RB", "contract": "RB2508", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3383.0, "high": 3388.0, "low": 3324.0, "close": 3332.0, "pre_close": 3395.0, "volume": 197.0, "range_pct": 0.01920768307322929, "extreme_pct": 0.01680672268907563, "range_q90": 0.01529136009037664, "range_q95": 0.01542265341642569, "range_q99": 0.015636336485534988, "extreme_q90": 0.013178591431883605, "extreme_q95": 0.013737046279244623, "extreme_q99": 0.014825562008957271, "raw_structure_residual": 0.0021008403361344537, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.0, "structure_q99": 0.0, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.0, "uniqueness_q99": 0.0, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2508", "volume": 197.0, "high": 3388.0, "low": 3324.0, "close": 3332.0, "range_pct": 0.01920768307322929, "raw_structure_residual": 0.0021008403361344537, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2510|2025-02-05", "commodity": "RB", "contract": "RB2510", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3432.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "pre_close": 3421.0, "volume": 23656.0, "range_pct": 0.025892857142857145, "extreme_pct": 0.02261904761904762, "range_q90": 0.017283872107401524, "range_q95": 0.021176795580110496, "range_q99": 0.02117826887661142, "extreme_q90": 0.01494385243711036, "extreme_q95": 0.01926380312714404, "extreme_q99": 0.020323348860722925, "raw_structure_residual": 0.007738095238095238, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.007053906826094097, "structure_q95": 0.024958261949098972, "structure_q99": 0.031510012968481604, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.007053906826094097, "uniqueness_q95": 0.024958261949098972, "uniqueness_q99": 0.031510012968481604, "active_peer_count": 4, "peer_high_median": 3410.0, "peer_low_median": 3319.0, "peer_volume_median": 41625.0, "peer_range_median": 0.02731534874166123, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": true, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2511|2025-02-05", "commodity": "RB", "contract": "RB2511", "trade_date": "2025-02-05 00:00:00", "candidate_score": 20.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 20.0, "A1_score": 12.0, "A2_score": 8.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3410.0, "high": 3462.0, "low": 3365.0, "close": 3375.0, "pre_close": 3435.0, "volume": 144.0, "range_pct": 0.02874074074074074, "extreme_pct": 0.025777777777777778, "range_q90": 0.01328908039413625, "range_q95": 0.014272910943511519, "range_q99": 0.014819391572866525, "extreme_q90": 0.011565866654951589, "extreme_q95": 0.012275401331681356, "extreme_q99": 0.014185285544928643, "raw_structure_residual": 0.011851851851851851, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.027004555151934534, "structure_q95": 0.1212922469744146, "structure_q99": 0.40250845794978785, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.027004555151934534, "uniqueness_q95": 0.1212922469744146, "uniqueness_q99": 0.40250845794978785, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2511", "volume": 144.0, "high": 3462.0, "low": 3365.0, "close": 3375.0, "range_pct": 0.02874074074074074, "raw_structure_residual": 0.011851851851851851, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2504|2025-02-05", "commodity": "RB", "contract": "RB2504", "trade_date": "2025-02-05 00:00:00", "candidate_score": 13.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 13.0, "A1_score": 8.0, "A2_score": 5.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3335.0, "high": 3336.0, "low": 3259.0, "close": 3277.0, "pre_close": 3323.0, "volume": 663.0, "range_pct": 0.023497101007018614, "extreme_pct": 0.018004272200183094, "range_q90": 0.015591570301199854, "range_q95": 0.0189730492090813, "range_q99": 0.034062219807980486, "extreme_q90": 0.013677372976818642, "extreme_q95": 0.01768528614871147, "extreme_q99": 0.02863702646997604, "raw_structure_residual": 0.02197131522734208, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.715302386483636, "structure_q95": 1.0689235678395497, "structure_q99": 1.5185957867173272, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.715302386483636, "uniqueness_q95": 1.0689235678395497, "uniqueness_q99": 1.5185957867173272, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2504", "volume": 663.0, "high": 3336.0, "low": 3259.0, "close": 3277.0, "range_pct": 0.023497101007018614, "raw_structure_residual": 0.02197131522734208, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2509|2025-02-05", "commodity": "RB", "contract": "RB2509", "trade_date": "2025-02-05 00:00:00", "candidate_score": 13.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "振幅异常", "main_reference_contract": "RB2505", "A_score": 13.0, "A1_score": 8.0, "A2_score": 5.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3410.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "pre_close": 3415.0, "volume": 10464.0, "range_pct": 0.024404761904761905, "extreme_pct": 0.020833333333333332, "range_q90": 0.01637768152217766, "range_q95": 0.020554932932823643, "range_q99": 0.03887245726417028, "extreme_q90": 0.014366054741636953, "extreme_q95": 0.01859516329218285, "extreme_q99": 0.03604963126068509, "raw_structure_residual": 0.005952380952380952, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.20465202113630515, "structure_q99": 1.1324078502875636, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.20465202113630515, "uniqueness_q99": 1.1324078502875636, "active_peer_count": 4, "peer_high_median": 3410.0, "peer_low_median": 3319.0, "peer_volume_median": 43841.5, "peer_range_median": 0.02731534874166123, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": true, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2502|2025-02-05", "commodity": "RB", "contract": "RB2502", "trade_date": "2025-02-05 00:00:00", "candidate_score": 0.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "目标合约流动性偏弱", "main_reference_contract": "RB2505", "A_score": 0.0, "A1_score": 0.0, "A2_score": 0.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": -10.0, "open": 3238.0, "high": 3250.0, "low": 3190.0, "close": 3190.0, "pre_close": 3300.0, "volume": 274.0, "range_pct": 0.018808777429467086, "extreme_pct": 0.018808777429467086, "range_q90": 0.02127285093250945, "range_q95": 0.025034538523737992, "range_q99": 0.03627963497747485, "extreme_q90": 0.020003666918071303, "extreme_q95": 0.023478854427354246, "extreme_q99": 0.035968498158198095, "raw_structure_residual": 0.044200626959247646, "excess_structure_residual": 0.016979568030142052, "normalized_structure_residual": 0.6237658892831306, "structure_q90": 2.8421143095315533, "structure_q95": 3.190661966825757, "structure_q99": 4.4834522586850145, "raw_uniqueness_gap": 0.6237658892831306, "uniqueness_gap": 0.6237658892831306, "uniqueness_q90": 2.8421143095315533, "uniqueness_q95": 3.190661966825757, "uniqueness_q99": 4.4834522586850145, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": true, "peer_rows": [{"is_target": true, "contract": "RB2502", "volume": 274.0, "high": 3250.0, "low": 3190.0, "close": 3190.0, "range_pct": 0.018808777429467086, "raw_structure_residual": 0.044200626959247646, "normalized_structure_residual": 0.6237658892831306, "candidate_score": 0.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2512|2025-02-05", "commodity": "RB", "contract": "RB2512", "trade_date": "2025-02-05 00:00:00", "candidate_score": 0.0, "candidate_level": "none", "sample_status": "valid", "trigger_reasons": "无明显触发项", "main_reference_contract": "RB2505", "A_score": 0.0, "A1_score": 0.0, "A2_score": 0.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": 0.0, "open": 3403.0, "high": 3406.0, "low": 3367.0, "close": 3376.0, "pre_close": 3430.0, "volume": 22.0, "range_pct": 0.0115521327014218, "extreme_pct": 0.008886255924170616, "range_q90": 0.01497454327643007, "range_q95": 0.017190300159238264, "range_q99": 0.01896290566548482, "extreme_q90": 0.013819464863275507, "extreme_q95": 0.01423681332261079, "extreme_q99": 0.014570692090079017, "raw_structure_residual": 0.0, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": 0.0, "structure_q95": 0.0, "structure_q99": 0.0, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": 0.0, "uniqueness_q95": 0.0, "uniqueness_q99": 0.0, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2512", "volume": 22.0, "high": 3406.0, "low": 3367.0, "close": 3376.0, "range_pct": 0.0115521327014218, "raw_structure_residual": 0.0, "normalized_structure_residual": 0.0, "candidate_score": 0.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}, {"detail_id": "RB|RB2601|2025-02-05", "commodity": "RB", "contract": "RB2601", "trade_date": "2025-02-05 00:00:00", "candidate_score": 0.0, "candidate_level": "none", "sample_status": "invalid_insufficient_history", "trigger_reasons": "样本状态=历史样本不足", "main_reference_contract": "RB2505", "A_score": 0.0, "A1_score": 0.0, "A2_score": 0.0, "C_score": 0.0, "C1_score": 0.0, "C2_score": 0.0, "E_score": -20.0, "open": 3459.0, "high": 3459.0, "low": 3375.0, "close": 3382.0, "pre_close": 3450.0, "volume": 616.0, "range_pct": 0.024837374334713187, "extreme_pct": 0.022767593140153756, "range_q90": null, "range_q95": null, "range_q99": null, "extreme_q90": null, "extreme_q95": null, "extreme_q99": null, "raw_structure_residual": 0.01094027202838557, "excess_structure_residual": 0.0, "normalized_structure_residual": 0.0, "structure_q90": null, "structure_q95": null, "structure_q99": null, "raw_uniqueness_gap": 0.0, "uniqueness_gap": 0.0, "uniqueness_q90": null, "uniqueness_q95": null, "uniqueness_q99": null, "active_peer_count": 5, "peer_high_median": 3422.0, "peer_low_median": 3331.0, "peer_volume_median": 23656.0, "peer_range_median": 0.027221058929105594, "peer_comparability_weak_flag": false, "target_liquidity_weak_flag": false, "peer_rows": [{"is_target": true, "contract": "RB2601", "volume": 616.0, "high": 3459.0, "low": 3375.0, "close": 3382.0, "range_pct": 0.024837374334713187, "raw_structure_residual": 0.01094027202838557, "normalized_structure_residual": 0.0, "candidate_score": 0.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2505", "volume": 1169030.0, "high": 3398.0, "low": 3307.0, "close": 3320.0, "range_pct": 0.027409638554216867, "raw_structure_residual": 0.009789156626506024, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2507", "volume": 64027.0, "high": 3422.0, "low": 3331.0, "close": 3343.0, "range_pct": 0.027221058929105594, "raw_structure_residual": 0.0023930601256356566, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2510", "volume": 23656.0, "high": 3436.0, "low": 3349.0, "close": 3360.0, "range_pct": 0.025892857142857145, "raw_structure_residual": 0.007738095238095238, "normalized_structure_residual": 0.0, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2503", "volume": 19223.0, "high": 3332.0, "low": 3242.0, "close": 3258.0, "range_pct": 0.027624309392265192, "raw_structure_residual": 0.02992633517495396, "normalized_structure_residual": 0.12687361008770295, "candidate_score": 20.0, "candidate_level": "none"}, {"is_target": false, "contract": "RB2509", "volume": 10464.0, "high": 3430.0, "low": 3348.0, "close": 3360.0, "range_pct": 0.024404761904761905, "raw_structure_residual": 0.005952380952380952, "normalized_structure_residual": 0.0, "candidate_score": 13.0, "candidate_level": "none"}]}]</script>
+  <script>
+    const commodityFilter = document.getElementById('commodityFilter');
+    const keywordFilter = document.getElementById('keywordFilter');
+    const tbody = document.getElementById('suspiciousTableBody');
+    const invalidTbody = document.getElementById('invalidTableBody');
+    const commodityHeader = document.getElementById('commodityHeader');
+    const tradeDateHeader = document.getElementById('tradeDateHeader');
+    const scoreHeader = document.getElementById('scoreHeader');
+    const detailModal = document.getElementById('record-detail-modal');
+    const detailContent = document.getElementById('record-detail-content');
+    const detailTitle = document.getElementById('record-detail-title');
+    const detailCloseButton = document.getElementById('record-detail-close');
+    const detailRecords = JSON.parse(document.getElementById('detailRecordsJson').textContent || '[]');
+    const detailRecordMap = new Map(detailRecords.map(record => [record.detail_id, record]));
+    const sortableHeaders = {
+      commodity: commodityHeader,
+      trade_date: tradeDateHeader,
+      score: scoreHeader,
+    };
+    let activeSortColumn = 'score';
+    let activeSortDirection = 'desc';
+
+    function formatNumber(value, digits = 2) {
+      if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      return Number(value).toFixed(digits);
+    }
+
+    function formatPercent(value, digits = 2) {
+      if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      return `${(Number(value) * 100).toFixed(digits)}%`;
+    }
+
+    function formatDate(value) {
+      if (value === null || value === undefined || value === '') {
+        return 'N/A';
+      }
+      return String(value).replace(' 00:00:00', '');
+    }
+
+    function renderKeyValueRows(items) {
+      return items.map(item => `
+        <div class="detail-label">${item.label}</div>
+        <div class="detail-value">${item.value}</div>
+      `).join('');
+    }
+
+    function formatPercentDelta(value, digits = 1) {
+      if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      return `${Number(value).toFixed(digits)}%`;
+    }
+
+    function percentile(sortedValues, ratio) {
+      if (!sortedValues.length) {
+        return null;
+      }
+      const idx = (sortedValues.length - 1) * ratio;
+      const lo = Math.floor(idx);
+      const hi = Math.ceil(idx);
+      if (lo === hi) {
+        return sortedValues[lo];
+      }
+      return sortedValues[lo] + (sortedValues[hi] - sortedValues[lo]) * (idx - lo);
+    }
+
+    function bucketLabel(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return 'N/A';
+      }
+      const numericValue = Number(value);
+      if (numericValue < 0) {
+        return '<0%';
+      }
+      const start = Math.floor(numericValue / 5) * 5;
+      return `${start}%~${start + 5}%`;
+    }
+
+    function summarizeMetric(values) {
+      const valid = values.filter(value => value !== null && value !== undefined && !Number.isNaN(Number(value))).map(Number).sort((a, b) => a - b);
+      if (!valid.length) {
+        return { count: 0, p50: null, p90: null, max: null };
+      }
+      return {
+        count: valid.length,
+        p50: percentile(valid, 0.5),
+        p90: percentile(valid, 0.9),
+        max: valid[valid.length - 1],
+      };
+    }
+
+    function buildBucketEntries(values) {
+      const counter = new Map();
+      for (const value of values) {
+        const label = bucketLabel(value);
+        counter.set(label, (counter.get(label) || 0) + 1);
+      }
+      return Array.from(counter.entries()).sort((a, b) => {
+        const orderValue = label => {
+          if (label === '<0%') {
+            return -1;
+          }
+          if (label === 'N/A') {
+            return Number.POSITIVE_INFINITY;
+          }
+          return Number(label.split('%', 1)[0]);
+        };
+        return orderValue(a[0]) - orderValue(b[0]);
+      });
+    }
+
+    function computeAmplitudePeerSummary(records, suspiciousDetailIds) {
+      const amplitudeRecords = records
+        .filter(record => suspiciousDetailIds.has(record.detail_id))
+        .filter(record => String(record.trigger_reasons || '').includes('振幅异常'))
+        .map(record => {
+          const high = Number(record.high);
+          const low = Number(record.low);
+          const peerHigh = Number(record.peer_high_median);
+          const peerLow = Number(record.peer_low_median);
+          const rangePct = Number(record.range_pct);
+          const peerRangePct = Number(record.peer_range_median);
+          return {
+            detail_id: record.detail_id,
+            highExcessPct: Number.isFinite(high) && Number.isFinite(peerHigh) && peerHigh !== 0 ? ((high - peerHigh) / peerHigh) * 100 : null,
+            lowBreachPct: Number.isFinite(low) && Number.isFinite(peerLow) && peerLow !== 0 ? ((peerLow - low) / peerLow) * 100 : null,
+            rangeExcessPct: Number.isFinite(rangePct) && Number.isFinite(peerRangePct) && peerRangePct !== 0 ? ((rangePct - peerRangePct) / peerRangePct) * 100 : null,
+          };
+        });
+
+      return {
+        totalCount: amplitudeRecords.length,
+        high: {
+          summary: summarizeMetric(amplitudeRecords.map(record => record.highExcessPct).filter(value => value !== null && value > 0)),
+          buckets: buildBucketEntries(amplitudeRecords.map(record => record.highExcessPct).filter(value => value !== null && value > 0)),
+        },
+        low: {
+          summary: summarizeMetric(amplitudeRecords.map(record => record.lowBreachPct).filter(value => value !== null && value > 0)),
+          buckets: buildBucketEntries(amplitudeRecords.map(record => record.lowBreachPct).filter(value => value !== null && value > 0)),
+        },
+        range: {
+          summary: summarizeMetric(amplitudeRecords.map(record => record.rangeExcessPct).filter(value => value !== null && value > 0)),
+          buckets: buildBucketEntries(amplitudeRecords.map(record => record.rangeExcessPct).filter(value => value !== null && value > 0)),
+        },
+      };
+    }
+
+    function renderSummaryCard(title, summary, helperText) {
+      return `
+        <div class="summary-card">
+          <strong>${title}</strong>
+          <div class="metric">${summary.count}</div>
+          <div class="submetric">
+            P50=${formatPercentDelta(summary.p50)}<br>
+            P90=${formatPercentDelta(summary.p90)}<br>
+            Max=${formatPercentDelta(summary.max)}<br>
+            ${helperText}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderMonthSummaryCard(title, summary, helperText) {
+      return `
+        <div class="summary-card">
+          <strong>${title}</strong>
+          <div class="metric">${summary.count}</div>
+          <div class="submetric">
+            P50=${formatNumber(summary.p50, 1)}个月<br>
+            P90=${formatNumber(summary.p90, 1)}个月<br>
+            Max=${formatNumber(summary.max, 1)}个月<br>
+            ${helperText}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBucketCard(title, entries) {
+      const rows = entries.length
+        ? entries.map(([label, count]) => `<tr><td>${label}</td><td>${count}</td></tr>`).join('')
+        : '<tr><td colspan="2">无记录</td></tr>';
+      return `
+        <div class="bucket-card">
+          <h3>${title}</h3>
+          <table>
+            <thead><tr><th>分档</th><th>数量</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <span class="muted">这里只统计大于 0% 的记录；负值说明该项并没有比同日基线更极端。</span>
+        </div>
+      `;
+    }
+
+    function renderAmplitudePeerSummary(summary) {
+      const summaryRoot = document.getElementById('amplitudePeerSummary');
+      const bucketRoot = document.getElementById('amplitudePeerBuckets');
+      if (!summaryRoot || !bucketRoot) {
+        return;
+      }
+      summaryRoot.innerHTML = [
+        renderSummaryCard('最高点高出多少', summary.high.summary, `总振幅异常记录=${summary.totalCount}`),
+        renderSummaryCard('最低点低出多少', summary.low.summary, `正向命中=${summary.low.summary.count}`),
+        renderSummaryCard('振幅高出多少', summary.range.summary, `正向命中=${summary.range.summary.count}`),
+      ].join('');
+      bucketRoot.innerHTML = [
+        renderBucketCard('最高点高出分布', summary.high.buckets),
+        renderBucketCard('最低点低出分布', summary.low.buckets),
+        renderBucketCard('振幅高出分布', summary.range.buckets),
+      ].join('');
+    }
+
+    function parseContractDeliveryMonth(contractCode) {
+      const text = String(contractCode || '').toUpperCase();
+      const match = text.match(/(\d{4})$/);
+      if (!match) {
+        return null;
+      }
+      const yy = Number(match[1].slice(0, 2));
+      const mm = Number(match[1].slice(2, 4));
+      if (!Number.isFinite(yy) || !Number.isFinite(mm) || mm < 1 || mm > 12) {
+        return null;
+      }
+      return 2000 + yy * 12 + (mm - 1);
+    }
+
+    function computeContractGapSummary(records, suspiciousDetailIds) {
+      const rows = records
+        .filter(record => suspiciousDetailIds.has(record.detail_id))
+        .map(record => {
+          const targetMonth = parseContractDeliveryMonth(record.contract);
+          const refMonth = parseContractDeliveryMonth(record.main_reference_contract);
+          const gapMonths = targetMonth === null || refMonth === null ? null : Math.abs(targetMonth - refMonth);
+          return {
+            commodity: String(record.commodity || ''),
+            gapMonths,
+          };
+        })
+        .filter(item => item.gapMonths !== null);
+
+      const bucketMap = new Map();
+      for (const row of rows) {
+        bucketMap.set(row.gapMonths, (bucketMap.get(row.gapMonths) || 0) + 1);
+      }
+
+      const commodityMap = new Map();
+      for (const row of rows) {
+        if (!commodityMap.has(row.commodity)) {
+          commodityMap.set(row.commodity, []);
+        }
+        commodityMap.get(row.commodity).push(row.gapMonths);
+      }
+
+      const commoditySummary = Array.from(commodityMap.entries()).map(([commodity, values]) => {
+        const sorted = values.slice().sort((a, b) => a - b);
+        return {
+          commodity,
+          count: sorted.length,
+          p50: percentile(sorted, 0.5),
+          p90: percentile(sorted, 0.9),
+          max: sorted[sorted.length - 1],
+        };
+      }).sort((a, b) => b.count - a.count || a.commodity.localeCompare(b.commodity, 'zh-CN'));
+
+      const allValues = rows.map(row => row.gapMonths).sort((a, b) => a - b);
+      return {
+        totalCount: rows.length,
+        p50: percentile(allValues, 0.5),
+        p90: percentile(allValues, 0.9),
+        max: allValues.length ? allValues[allValues.length - 1] : null,
+        buckets: Array.from(bucketMap.entries()).sort((a, b) => a[0] - b[0]),
+        commoditySummary,
+      };
+    }
+
+    function renderContractGapSummary(summary) {
+      const summaryRoot = document.getElementById('contractGapSummary');
+      const bucketBody = document.getElementById('contractGapBucketBody');
+      const commodityBody = document.getElementById('contractGapCommodityBody');
+      if (!summaryRoot || !bucketBody || !commodityBody) {
+        return;
+      }
+      summaryRoot.innerHTML = [
+        renderMonthSummaryCard('可计算月差记录数', { count: summary.totalCount, p50: summary.p50, p90: summary.p90, max: summary.max }, '这里统计的是可疑日期记录'),
+        renderMonthSummaryCard('整体月差分布', { count: summary.totalCount, p50: summary.p50, p90: summary.p90, max: summary.max }, '单位：月'),
+        renderMonthSummaryCard('最大月差', { count: summary.totalCount, p50: summary.p50, p90: summary.p90, max: summary.max }, '用于快速看跨远月偏离'),
+      ].join('');
+      bucketBody.innerHTML = summary.buckets.length
+        ? summary.buckets.map(([gap, count]) => `<tr><td>${gap}</td><td>${count}</td></tr>`).join('')
+        : '<tr><td colspan="2">无记录</td></tr>';
+      commodityBody.innerHTML = summary.commoditySummary.length
+        ? summary.commoditySummary.map(item => `<tr><td>${escapeHtml(item.commodity)}</td><td>${item.count}</td><td>${formatNumber(item.p50, 1)}</td><td>${formatNumber(item.p90, 1)}</td><td>${formatNumber(item.max, 1)}</td></tr>`).join('')
+        : '<tr><td colspan="5">无记录</td></tr>';
+    }
+
+    function sampleStatusLabel(value) {
+      const labels = {
+        valid: '有效样本',
+        invalid_basic_data: '基础数据无效',
+        invalid_low_liquidity: '低流动性无效',
+        invalid_lifecycle_edge: '生命周期边界无效',
+        invalid_insufficient_history: '历史样本不足',
+        invalid_insufficient_peer: '对照不足',
+      };
+      return labels[value] || String(value ?? 'N/A');
+    }
+
+    function hitLevel(value, q90, q95, q99) {
+      const numericValue = Number(value);
+      const threshold90 = Number(q90);
+      const threshold95 = Number(q95);
+      const threshold99 = Number(q99);
+      if (Number.isNaN(numericValue)) {
+        return 'none';
+      }
+      if (!Number.isNaN(threshold99) && threshold99 > 0 && numericValue >= threshold99) {
+        return 'P99';
+      }
+      if (!Number.isNaN(threshold95) && threshold95 > 0 && numericValue >= threshold95) {
+        return 'P95';
+      }
+      if (!Number.isNaN(threshold90) && threshold90 > 0 && numericValue >= threshold90) {
+        return 'P90';
+      }
+      return 'none';
+    }
+
+    function renderThresholdChips(value, q90, q95, q99, formatter) {
+      const level = hitLevel(value, q90, q95, q99);
+      return `
+        <div class="threshold-group">
+          <div class="threshold-title">阈值命中情况</div>
+          <div class="threshold-row">
+            <span class="threshold-chip ${level === 'P90' ? 'threshold-hit' : ''}">P90: ${formatter(q90)}</span>
+            <span class="threshold-chip ${level === 'P95' ? 'threshold-hit' : ''}">P95: ${formatter(q95)}</span>
+            <span class="threshold-chip ${level === 'P99' ? 'threshold-hit' : ''}">P99: ${formatter(q99)}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBadgeRow(badges) {
+      return `
+        <div class="detail-badge-row">
+          ${
+            badges.map(badge => `<span class="detail-badge ${badge.hit ? 'hit' : ''} ${badge.invalid ? 'invalid' : ''}">${badge.text}</span>`).join('')
+          }
+        </div>
+      `;
+    }
+
+    function renderPeerCompareTable(peerRows) {
+      if (!Array.isArray(peerRows) || peerRows.length === 0) {
+        return '<div class="muted">没有可展示的同日活跃合约对比数据。</div>';
+      }
+      const rows = peerRows.map(row => `
+        <tr class="${row.is_target ? 'peer-target-row' : ''}">
+          <td>${row.is_target ? '目标' : 'Peer'}</td>
+          <td>${escapeHtml(row.contract)}</td>
+          <td>${formatNumber(row.volume, 0)}</td>
+          <td>${formatNumber(row.high)}</td>
+          <td>${formatNumber(row.low)}</td>
+          <td>${formatNumber(row.close)}</td>
+          <td>${formatPercent(row.range_pct)}</td>
+          <td>${formatPercent(row.raw_structure_residual)}</td>
+          <td>${formatNumber(row.normalized_structure_residual, 4)}</td>
+          <td>${formatNumber(row.candidate_score)}</td>
+          <td>${escapeHtml(row.candidate_level)}</td>
+        </tr>
+      `).join('');
+      return `
+        <table class="peer-compare-table">
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>合约</th>
+              <th>成交量</th>
+              <th>最高</th>
+              <th>最低</th>
+              <th>收盘</th>
+              <th>振幅</th>
+              <th>原始残差</th>
+              <th>归一化残差</th>
+              <th>分数</th>
+              <th>等级</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    function showRecordDetail(detailId) {
+      const record = detailRecordMap.get(detailId);
+      if (!record) {
+        return;
+      }
+      const isInvalid = record.sample_status !== 'valid';
+      const rangeHit = hitLevel(record.range_pct, record.range_q90, record.range_q95, record.range_q99);
+      const extremeHit = hitLevel(record.extreme_pct, record.extreme_q90, record.extreme_q95, record.extreme_q99);
+      const structureHit = hitLevel(record.normalized_structure_residual, record.structure_q90, record.structure_q95, record.structure_q99);
+      const uniquenessHit = hitLevel(record.uniqueness_gap, record.uniqueness_q90, record.uniqueness_q95, record.uniqueness_q99);
+      detailTitle.textContent = `${record.contract} ${formatDate(record.trade_date)} 计算详情`;
+      detailContent.innerHTML = `
+        ${
+          isInvalid
+            ? `<div class="invalid-explanation">这条记录没有进入正式候选计算。当前样本状态是 <strong>${escapeHtml(sampleStatusLabel(record.sample_status))}</strong>，原因是：${escapeHtml(record.trigger_reasons || '无可用解释')}。</div>`
+            : ''
+        }
+        <div class="detail-grid">
+          <section class="detail-section">
+            <h3>基础数据</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '品种', value: escapeHtml(record.commodity) },
+                  { label: '合约', value: escapeHtml(record.contract) },
+                  { label: '日期', value: escapeHtml(formatDate(record.trade_date)) },
+                  { label: '开盘', value: formatNumber(record.open) },
+                  { label: '最高', value: formatNumber(record.high) },
+                  { label: '最低', value: formatNumber(record.low) },
+                  { label: '收盘', value: formatNumber(record.close) },
+                  { label: '昨收', value: formatNumber(record.pre_close) },
+                  { label: '成交量', value: formatNumber(record.volume, 0) },
+                  { label: '主参考合约', value: escapeHtml(record.main_reference_contract || 'N/A') },
+                ])
+              }
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>最终结论</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '样本状态', value: escapeHtml(sampleStatusLabel(record.sample_status)) },
+                  { label: '候选等级', value: escapeHtml(record.candidate_level) },
+                  { label: '总分', value: formatNumber(record.candidate_score) },
+                  { label: 'A 分', value: formatNumber(record.A_score) },
+                  { label: 'C 分', value: formatNumber(record.C_score) },
+                  { label: 'E 分', value: formatNumber(record.E_score) },
+                  { label: '触发原因', value: escapeHtml(record.trigger_reasons) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `A=${formatNumber(record.A_score)}`, hit: Number(record.A_score) > 0 },
+                { text: `C=${formatNumber(record.C_score)}`, hit: Number(record.C_score) > 0 },
+                { text: `E=${formatNumber(record.E_score)}`, hit: Number(record.E_score) < 0, invalid: Number(record.E_score) < 0 },
+              ])
+            }
+          </section>
+          <section class="detail-section">
+            <h3>同日基线</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: '活跃可比合约数', value: formatNumber(record.active_peer_count, 0) },
+                  { label: 'peer_high_median', value: formatNumber(record.peer_high_median) },
+                  { label: 'peer_low_median', value: formatNumber(record.peer_low_median) },
+                  { label: 'peer_volume_median', value: formatNumber(record.peer_volume_median, 0) },
+                  { label: 'peer_range_median', value: formatPercent(record.peer_range_median) },
+                  { label: '可比性偏弱', value: record.peer_comparability_weak_flag ? '是' : '否' },
+                  { label: '目标流动性偏弱', value: record.target_liquidity_weak_flag ? '是' : '否' },
+                ])
+              }
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>A 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'range_pct', value: formatPercent(record.range_pct) },
+                  { label: 'range_q90/q95/q99', value: `${formatPercent(record.range_q90)} / ${formatPercent(record.range_q95)} / ${formatPercent(record.range_q99)}` },
+                  { label: 'A1', value: formatNumber(record.A1_score) },
+                  { label: 'extreme_pct', value: formatPercent(record.extreme_pct) },
+                  { label: 'extreme_q90/q95/q99', value: `${formatPercent(record.extreme_q90)} / ${formatPercent(record.extreme_q95)} / ${formatPercent(record.extreme_q99)}` },
+                  { label: 'A2', value: formatNumber(record.A2_score) },
+                  { label: 'A 总分', value: formatNumber(record.A_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `range命中=${rangeHit}`, hit: rangeHit !== 'none' },
+                { text: `extreme命中=${extremeHit}`, hit: extremeHit !== 'none' },
+              ])
+            }
+            ${
+              renderThresholdChips(record.range_pct, record.range_q90, record.range_q95, record.range_q99, value => formatPercent(value))
+            }
+            ${
+              renderThresholdChips(record.extreme_pct, record.extreme_q90, record.extreme_q95, record.extreme_q99, value => formatPercent(value))
+            }
+            <div class="detail-formula">
+              A = A1 + A2，其中 A1 看振幅是否超过历史分位阈值，A2 看盘中极值是否超过历史分位阈值。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>C 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'raw_structure_residual', value: formatPercent(record.raw_structure_residual) },
+                  { label: 'excess_structure_residual', value: formatPercent(record.excess_structure_residual) },
+                  { label: 'normalized_structure_residual', value: formatNumber(record.normalized_structure_residual, 4) },
+                  { label: 'structure_q90/q95/q99', value: `${formatNumber(record.structure_q90, 4)} / ${formatNumber(record.structure_q95, 4)} / ${formatNumber(record.structure_q99, 4)}` },
+                  { label: 'C1', value: formatNumber(record.C1_score) },
+                  { label: 'raw_uniqueness_gap', value: formatNumber(record.raw_uniqueness_gap, 4) },
+                  { label: 'uniqueness_gap', value: formatNumber(record.uniqueness_gap, 4) },
+                  { label: 'uniqueness_q90/q95/q99', value: `${formatNumber(record.uniqueness_q90, 4)} / ${formatNumber(record.uniqueness_q95, 4)} / ${formatNumber(record.uniqueness_q99, 4)}` },
+                  { label: 'C2', value: formatNumber(record.C2_score) },
+                  { label: 'C 总分', value: formatNumber(record.C_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `structure命中=${structureHit}`, hit: structureHit !== 'none' },
+                { text: `uniqueness命中=${uniquenessHit}`, hit: uniquenessHit !== 'none' },
+              ])
+            }
+            ${
+              renderThresholdChips(record.normalized_structure_residual, record.structure_q90, record.structure_q95, record.structure_q99, value => formatNumber(value, 4))
+            }
+            ${
+              renderThresholdChips(record.uniqueness_gap, record.uniqueness_q90, record.uniqueness_q95, record.uniqueness_q99, value => formatNumber(value, 4))
+            }
+            <div class="detail-formula">
+              C1 先看相对同日活跃合约基线的结构偏离，再扣掉同日正常波动带并归一化；C2 再看这种偏离在同日横截面里是不是特别突出。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>E 计算过程</h3>
+            <div class="detail-list">
+              ${
+                renderKeyValueRows([
+                  { label: 'sample_status', value: escapeHtml(sampleStatusLabel(record.sample_status)) },
+                  { label: 'active_peer_count', value: formatNumber(record.active_peer_count, 0) },
+                  { label: 'peer_comparability_weak_flag', value: record.peer_comparability_weak_flag ? 'True' : 'False' },
+                  { label: 'target_liquidity_weak_flag', value: record.target_liquidity_weak_flag ? 'True' : 'False' },
+                  { label: 'E', value: formatNumber(record.E_score) },
+                ])
+              }
+            </div>
+            ${
+              renderBadgeRow([
+                { text: `sample_status=${escapeHtml(sampleStatusLabel(record.sample_status))}`, invalid: isInvalid },
+                { text: `peer_count=${formatNumber(record.active_peer_count, 0)}`, hit: Number(record.active_peer_count) >= 1 },
+                { text: `peer弱=${record.peer_comparability_weak_flag ? '是' : '否'}`, invalid: !!record.peer_comparability_weak_flag },
+                { text: `volume弱=${record.target_liquidity_weak_flag ? '是' : '否'}`, invalid: !!record.target_liquidity_weak_flag },
+              ])
+            }
+            <div class="detail-formula">
+              E 只做可信度惩罚：无效样本或无可比合约时直接给 -20；只有 1 个可比合约或可比性偏弱时给更轻的惩罚。
+            </div>
+          </section>
+          <section class="detail-section">
+            <h3>同日活跃合约对比</h3>
+            ${
+              renderPeerCompareTable(record.peer_rows)
+            }
+            <div class="detail-formula">
+              这张表展示同日活跃合约横截面。目标合约会高亮，你可以直接对比它和其他活跃合约在最高价、最低价、振幅、结构残差上的差异。
+            </div>
+          </section>
+        </div>
+      `;
+      detailModal.classList.add('open');
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? 'N/A')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function closeRecordDetail() {
+      detailModal.classList.remove('open');
+    }
+
+    function updateSortHeaderLabels() {
+      const labels = {
+        commodity: '品种',
+        trade_date: '日期',
+        score: '分数',
+      };
+      for (const [column, header] of Object.entries(sortableHeaders)) {
+        if (!header) {
+          continue;
+        }
+        const suffix = activeSortColumn === column ? (activeSortDirection === 'desc' ? ' ↓' : ' ↑') : '';
+        header.textContent = `${labels[column]}${suffix}`;
+      }
+    }
+
+    function sortRowsByColumn(column, direction) {
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      rows.sort((a, b) => {
+        let valueA;
+        let valueB;
+        if (column === 'score') {
+          valueA = parseFloat(a.querySelector('[data-col="score"]').textContent) || 0;
+          valueB = parseFloat(b.querySelector('[data-col="score"]').textContent) || 0;
+        } else if (column === 'commodity') {
+          valueA = a.querySelector('[data-col="commodity"]').textContent.trim();
+          valueB = b.querySelector('[data-col="commodity"]').textContent.trim();
+        } else if (column === 'trade_date') {
+          valueA = a.children[2].textContent.trim();
+          valueB = b.children[2].textContent.trim();
+        } else {
+          valueA = '';
+          valueB = '';
+        }
+
+        if (column === 'score') {
+          return direction === 'desc' ? valueB - valueA : valueA - valueB;
+        }
+
+        const compareResult = String(valueA).localeCompare(String(valueB), 'zh-CN');
+        return direction === 'desc' ? -compareResult : compareResult;
+      });
+      for (const row of rows) {
+        tbody.appendChild(row);
+      }
+      updateSortHeaderLabels();
+    }
+
+    function applyFilters() {
+      const commodity = commodityFilter.value.trim();
+      const keyword = keywordFilter.value.trim().toLowerCase();
+      for (const row of [tbody, invalidTbody].flatMap(section => Array.from(section.querySelectorAll('tr')))) {
+        const cells = Array.from(row.querySelectorAll('td'));
+        const commodityValue = row.querySelector('[data-col="commodity"]').textContent.trim();
+        const rowText = cells.map(cell => cell.textContent).join(' ').toLowerCase();
+        const matchedCommodity = !commodity || commodityValue === commodity;
+        const matchedKeyword = !keyword || rowText.includes(keyword);
+        row.style.display = matchedCommodity && matchedKeyword ? '' : 'none';
+      }
+    }
+
+    commodityFilter.addEventListener('change', applyFilters);
+    keywordFilter.addEventListener('input', applyFilters);
+    for (const [column, header] of Object.entries(sortableHeaders)) {
+      header.addEventListener('click', () => {
+        if (activeSortColumn === column) {
+          activeSortDirection = activeSortDirection === 'desc' ? 'asc' : 'desc';
+        } else {
+          activeSortColumn = column;
+          activeSortDirection = column === 'score' ? 'desc' : 'asc';
+        }
+        sortRowsByColumn(activeSortColumn, activeSortDirection);
+        applyFilters();
+      });
+    }
+    tbody.addEventListener('click', event => {
+      const row = event.target.closest('tr[data-detail-id]');
+      if (!row) {
+        return;
+      }
+      showRecordDetail(row.dataset.detailId);
+    });
+    invalidTbody.addEventListener('click', event => {
+      const row = event.target.closest('tr[data-detail-id]');
+      if (!row) {
+        return;
+      }
+      showRecordDetail(row.dataset.detailId);
+    });
+    detailCloseButton.addEventListener('click', closeRecordDetail);
+    detailModal.addEventListener('click', event => {
+      if (event.target === detailModal) {
+        closeRecordDetail();
+      }
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && detailModal.classList.contains('open')) {
+        closeRecordDetail();
+      }
+    });
+    const suspiciousDetailIds = new Set(Array.from(tbody.querySelectorAll('tr[data-detail-id]')).map(row => row.dataset.detailId));
+    renderAmplitudePeerSummary(computeAmplitudePeerSummary(detailRecords, suspiciousDetailIds));
+    renderContractGapSummary(computeContractGapSummary(detailRecords, suspiciousDetailIds));
+    sortRowsByColumn(activeSortColumn, activeSortDirection);
+  </script>
+</body>
+</html>

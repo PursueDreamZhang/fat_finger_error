@@ -174,6 +174,8 @@ def _render_event_section(event: dict[str, object], payload: dict[str, object]) 
         ("区间成交均价", _format_value(event.get("interval_vwap_anchor"))),
         ("最新成交价", _format_value(event.get("last_price_anchor"))),
         ("事件成交量", _format_value(event.get("event_volume"))),
+        ("日线最高价", _format_value(payload.get("daily_high"))),
+        ("日线最低价", _format_value(payload.get("daily_low"))),
         ("回归标签", _translate_recovery(event.get("recovery_label"))),
     ]
 

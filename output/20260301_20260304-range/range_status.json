@@ -1,0 +1,77 @@
+{
+  "start_date": "20260301",
+  "end_date": "20260304",
+  "commodities": [
+    "EB",
+    "PP"
+  ],
+  "counts": {
+    "total_days": 4,
+    "completed_days": 3,
+    "failed_days": 0,
+    "missing_days": 1,
+    "missing_output_days": 0,
+    "incomplete_days": 0,
+    "event_count": 2,
+    "hit_commodities": 1
+  },
+  "days": [
+    {
+      "day": "20260301",
+      "status": "missing_day",
+      "events": 0,
+      "hits": 0,
+      "failed": 0,
+      "elapsed_seconds": null,
+      "summary_path": "../20260301-par/batch_summary.html",
+      "error": "数据目录或 zip 不存在"
+    },
+    {
+      "day": "20260302",
+      "status": "complete",
+      "events": 0,
+      "hits": 0,
+      "hit_commodities": [],
+      "failed": 0,
+      "elapsed_seconds": 82.0,
+      "summary_path": "../20260302-par/batch_summary.html",
+      "error": "No columns to parse from file"
+    },
+    {
+      "day": "20260303",
+      "status": "complete",
+      "events": 1,
+      "hits": 1,
+      "hit_commodities": [
+        "PP"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 151.0,
+      "summary_path": "../20260303-par/batch_summary.html",
+      "error": null
+    },
+    {
+      "day": "20260304",
+      "status": "complete",
+      "events": 1,
+      "hits": 1,
+      "hit_commodities": [
+        "PP"
+      ],
+      "failed": 0,
+      "elapsed_seconds": 218.0,
+      "summary_path": "../20260304-par/batch_summary.html",
+      "error": null
+    }
+  ],
+  "commodity_summary": [
+    {
+      "commodity": "PP",
+      "events": 2,
+      "days": 2,
+      "contracts": 2,
+      "top_reason": "interval_execution_drop",
+      "top_label": "trade_recovered_3s"
+    }
+  ]
+}

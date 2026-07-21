@@ -1,0 +1,15 @@
+{
+  "commodity": "PR",
+  "status": "success_no_events",
+  "started_at": "2026-07-17T22:34:14+0800",
+  "finished_at": "2026-07-17T22:34:44+0800",
+  "elapsed_seconds": 30.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "PR",
+  "event_replay_html": "PR/event_replay_PR.html",
+  "events_csv": "PR/tick_candidate_events.csv",
+  "log_file": "logs/PR.log",
+  "exit_code": 0,
+  "error": null
+}

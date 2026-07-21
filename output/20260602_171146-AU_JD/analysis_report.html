@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>乌龙指可疑日期分析报告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .overview { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>乌龙指可疑日期分析报告</h1>
+  <div class="overview">
+    <div class="card"><strong>分析品种</strong><div>AU,JD</div></div>
+    <div class="card"><strong>分析区间</strong><div>20240101 - 20241231</div></div>
+    <div class="card"><strong>候选数量</strong><div>0</div></div>
+  </div>
+
+  <h2>品种摘要</h2>
+  <table>
+    <thead><tr><th>品种</th><th>候选数量</th><th>可疑合约数</th><th>最高分</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>可疑日期</h2>
+  <table>
+    <thead><tr><th>品种</th><th>合约</th><th>日期</th><th>分数</th><th>等级</th><th>触发原因</th><th>主参考合约</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</body>
+</html>

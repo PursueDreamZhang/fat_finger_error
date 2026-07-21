@@ -1,0 +1,15 @@
+{
+  "commodity": "LU",
+  "status": "success_with_events",
+  "started_at": "2026-07-19T23:52:38+0800",
+  "finished_at": "2026-07-19T23:55:50+0800",
+  "elapsed_seconds": 192.0,
+  "event_count": 2,
+  "contract_count": 2,
+  "output_dir": "LU",
+  "event_replay_html": "LU/event_replay_LU.html",
+  "events_csv": "LU/tick_candidate_events.csv",
+  "log_file": "logs/LU.log",
+  "exit_code": 0,
+  "error": null
+}
