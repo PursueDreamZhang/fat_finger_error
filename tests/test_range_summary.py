@@ -162,6 +162,8 @@ def test_run_range_parallel_smoke_generates_range_html_and_nonzero_on_missing_da
             "AU,ZZ",
             "--total-parallel",
             "2",
+            "--day-parallel",
+            "2",
             "--target-workers",
             "1",
             "--data-root",
@@ -180,3 +182,87 @@ def test_run_range_parallel_smoke_generates_range_html_and_nonzero_on_missing_da
     assert (output_root / "20260520_20260521-range" / "range_summary.html").exists()
     status = json.loads((output_root / "20260520_20260521-range" / "range_status.json").read_text(encoding="utf-8"))
     assert status["counts"]["missing_days"] == 1
+
+
+def test_run_range_parallel_parallelizes_days_and_splits_budget(tmp_path):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "output"
+    for day in ("20260520", "20260521"):
+        day_dir = data_root / "202605" / day
+        day_dir.mkdir(parents=True, exist_ok=True)
+        _write_tick_csv(day_dir / f"au2606_{day}.csv", "au2606")
+        _write_tick_csv(day_dir / f"au2608_{day}.csv", "au2608")
+        _write_tick_csv(day_dir / f"au2610_{day}.csv", "au2610")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/run_range_parallel.sh",
+            "--start-date",
+            "20260520",
+            "--end-date",
+            "20260521",
+            "--commodities",
+            "AU",
+            "--total-parallel",
+            "10",
+            "--day-parallel",
+            "2",
+            "--target-workers",
+            "1",
+            "--data-root",
+            str(data_root),
+            "--output-root",
+            str(output_root),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "day_parallel=2 per_day_total=5" in result.stdout
+    assert (output_root / "20260520-par" / "batch_summary.html").exists()
+    assert (output_root / "20260521-par" / "batch_summary.html").exists()
+    assert (output_root / "20260520_20260521-range" / "range_summary.html").exists()
+
+
+def test_run_range_parallel_clamps_budget_to_one(tmp_path):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "output"
+    day_dir = data_root / "202605" / "20260520"
+    day_dir.mkdir(parents=True)
+    _write_tick_csv(day_dir / "au2606_20260520.csv", "au2606")
+    _write_tick_csv(day_dir / "au2608_20260520.csv", "au2608")
+    _write_tick_csv(day_dir / "au2610_20260520.csv", "au2610")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/run_range_parallel.sh",
+            "--start-date",
+            "20260520",
+            "--end-date",
+            "20260520",
+            "--commodities",
+            "AU",
+            "--total-parallel",
+            "3",
+            "--day-parallel",
+            "5",
+            "--target-workers",
+            "1",
+            "--data-root",
+            str(data_root),
+            "--output-root",
+            str(output_root),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "day_parallel=5 per_day_total=1" in result.stdout
