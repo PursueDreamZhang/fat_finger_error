@@ -1,9 +1,9 @@
 {
   "commodity": "PX",
   "status": "success_with_events",
-  "started_at": "2026-07-20T01:26:05+0800",
-  "finished_at": "2026-07-20T01:27:32+0800",
-  "elapsed_seconds": 87.0,
+  "started_at": "2026-07-22T13:36:19+0800",
+  "finished_at": "2026-07-22T13:37:18+0800",
+  "elapsed_seconds": 59.0,
   "event_count": 1,
   "contract_count": 1,
   "output_dir": "PX",

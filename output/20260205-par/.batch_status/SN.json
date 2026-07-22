@@ -1,0 +1,15 @@
+{
+  "commodity": "SN",
+  "status": "success_with_events",
+  "started_at": "2026-07-20T20:29:04+0800",
+  "finished_at": "2026-07-20T20:32:21+0800",
+  "elapsed_seconds": 197.0,
+  "event_count": 6,
+  "contract_count": 3,
+  "output_dir": "SN",
+  "event_replay_html": "SN/event_replay_SN.html",
+  "events_csv": "SN/tick_candidate_events.csv",
+  "log_file": "logs/SN.log",
+  "exit_code": 0,
+  "error": null
+}

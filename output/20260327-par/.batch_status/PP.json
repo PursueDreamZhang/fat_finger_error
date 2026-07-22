@@ -1,9 +1,9 @@
 {
   "commodity": "PP",
   "status": "success_no_events",
-  "started_at": "2026-07-20T01:25:32+0800",
-  "finished_at": "2026-07-20T01:27:45+0800",
-  "elapsed_seconds": 133.0,
+  "started_at": "2026-07-22T13:35:46+0800",
+  "finished_at": "2026-07-22T13:37:19+0800",
+  "elapsed_seconds": 93.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "PP",

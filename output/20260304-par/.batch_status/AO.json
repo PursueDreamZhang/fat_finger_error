@@ -1,0 +1,15 @@
+{
+  "commodity": "AO",
+  "status": "success_no_events",
+  "started_at": "2026-07-22T09:59:51+0800",
+  "finished_at": "2026-07-22T10:02:35+0800",
+  "elapsed_seconds": 164.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "AO",
+  "event_replay_html": "AO/event_replay_AO.html",
+  "events_csv": "AO/tick_candidate_events.csv",
+  "log_file": "logs/AO.log",
+  "exit_code": 0,
+  "error": null
+}

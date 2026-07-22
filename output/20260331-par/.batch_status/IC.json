@@ -1,0 +1,15 @@
+{
+  "commodity": "IC",
+  "status": "success_with_events",
+  "started_at": "2026-07-22T13:52:50+0800",
+  "finished_at": "2026-07-22T13:53:15+0800",
+  "elapsed_seconds": 25.0,
+  "event_count": 2,
+  "contract_count": 1,
+  "output_dir": "IC",
+  "event_replay_html": "IC/event_replay_IC.html",
+  "events_csv": "IC/tick_candidate_events.csv",
+  "log_file": "logs/IC.log",
+  "exit_code": 0,
+  "error": null
+}

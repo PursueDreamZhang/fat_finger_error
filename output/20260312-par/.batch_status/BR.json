@@ -1,9 +1,9 @@
 {
   "commodity": "BR",
   "status": "success_no_events",
-  "started_at": "2026-07-19T23:49:58+0800",
-  "finished_at": "2026-07-19T23:53:55+0800",
-  "elapsed_seconds": 237.0,
+  "started_at": "2026-07-22T11:11:46+0800",
+  "finished_at": "2026-07-22T11:14:15+0800",
+  "elapsed_seconds": 149.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "BR",

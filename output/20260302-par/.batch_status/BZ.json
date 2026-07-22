@@ -1,0 +1,15 @@
+{
+  "commodity": "BZ",
+  "status": "success_no_events",
+  "started_at": "2026-07-22T10:06:14+0800",
+  "finished_at": "2026-07-22T10:07:02+0800",
+  "elapsed_seconds": 48.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "BZ",
+  "event_replay_html": "BZ/event_replay_BZ.html",
+  "events_csv": "BZ/tick_candidate_events.csv",
+  "log_file": "logs/BZ.log",
+  "exit_code": 0,
+  "error": null
+}

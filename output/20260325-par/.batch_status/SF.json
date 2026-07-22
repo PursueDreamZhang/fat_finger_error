@@ -1,0 +1,15 @@
+{
+  "commodity": "SF",
+  "status": "success_with_events",
+  "started_at": "2026-07-22T13:08:19+0800",
+  "finished_at": "2026-07-22T13:08:54+0800",
+  "elapsed_seconds": 35.0,
+  "event_count": 2,
+  "contract_count": 1,
+  "output_dir": "SF",
+  "event_replay_html": "SF/event_replay_SF.html",
+  "events_csv": "SF/tick_candidate_events.csv",
+  "log_file": "logs/SF.log",
+  "exit_code": 0,
+  "error": null
+}

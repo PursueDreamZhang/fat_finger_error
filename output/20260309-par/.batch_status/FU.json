@@ -1,9 +1,9 @@
 {
   "commodity": "FU",
   "status": "success_with_events",
-  "started_at": "2026-07-19T23:26:52+0800",
-  "finished_at": "2026-07-19T23:29:04+0800",
-  "elapsed_seconds": 132.0,
+  "started_at": "2026-07-22T10:42:48+0800",
+  "finished_at": "2026-07-22T10:44:12+0800",
+  "elapsed_seconds": 84.0,
   "event_count": 1,
   "contract_count": 1,
   "output_dir": "FU",

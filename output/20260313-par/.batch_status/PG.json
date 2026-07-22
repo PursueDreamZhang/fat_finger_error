@@ -1,9 +1,9 @@
 {
   "commodity": "PG",
   "status": "success_no_events",
-  "started_at": "2026-07-20T00:01:44+0800",
-  "finished_at": "2026-07-20T00:02:30+0800",
-  "elapsed_seconds": 46.0,
+  "started_at": "2026-07-22T11:55:56+0800",
+  "finished_at": "2026-07-22T11:56:25+0800",
+  "elapsed_seconds": 29.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "PG",

@@ -1,9 +1,9 @@
 {
   "commodity": "BU",
   "status": "success_no_events",
-  "started_at": "2026-07-20T00:16:08+0800",
-  "finished_at": "2026-07-20T00:21:08+0800",
-  "elapsed_seconds": 300.0,
+  "started_at": "2026-07-22T11:45:56+0800",
+  "finished_at": "2026-07-22T11:49:07+0800",
+  "elapsed_seconds": 191.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "BU",

@@ -1,0 +1,15 @@
+{
+  "commodity": "RS",
+  "status": "success_no_events",
+  "started_at": "2026-07-22T13:35:34+0800",
+  "finished_at": "2026-07-22T13:35:36+0800",
+  "elapsed_seconds": 2.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "RS",
+  "event_replay_html": "RS/event_replay_RS.html",
+  "events_csv": "RS/tick_candidate_events.csv",
+  "log_file": "logs/RS.log",
+  "exit_code": 0,
+  "error": null
+}

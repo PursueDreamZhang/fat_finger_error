@@ -1,0 +1,15 @@
+{
+  "commodity": "JM",
+  "status": "success_no_events",
+  "started_at": "2026-07-22T10:13:30+0800",
+  "finished_at": "2026-07-22T10:15:01+0800",
+  "elapsed_seconds": 91.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "JM",
+  "event_replay_html": "JM/event_replay_JM.html",
+  "events_csv": "JM/tick_candidate_events.csv",
+  "log_file": "logs/JM.log",
+  "exit_code": 0,
+  "error": null
+}

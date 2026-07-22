@@ -1,0 +1,15 @@
+{
+  "commodity": "RB",
+  "status": "success_no_events",
+  "started_at": "2026-07-20T19:51:40+0800",
+  "finished_at": "2026-07-20T19:53:39+0800",
+  "elapsed_seconds": 119.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "RB",
+  "event_replay_html": "RB/event_replay_RB.html",
+  "events_csv": "RB/tick_candidate_events.csv",
+  "log_file": "logs/RB.log",
+  "exit_code": 0,
+  "error": null
+}

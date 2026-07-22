@@ -1,9 +1,9 @@
 {
   "commodity": "TA",
   "status": "success_with_events",
-  "started_at": "2026-07-19T23:46:24+0800",
-  "finished_at": "2026-07-19T23:47:59+0800",
-  "elapsed_seconds": 95.0,
+  "started_at": "2026-07-22T11:33:08+0800",
+  "finished_at": "2026-07-22T11:34:25+0800",
+  "elapsed_seconds": 77.0,
   "event_count": 1,
   "contract_count": 1,
   "output_dir": "TA",

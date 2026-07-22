@@ -1,9 +1,9 @@
 {
   "commodity": "EG",
   "status": "success_no_events",
-  "started_at": "2026-07-19T23:14:39+0800",
-  "finished_at": "2026-07-19T23:17:39+0800",
-  "elapsed_seconds": 180.0,
+  "started_at": "2026-07-22T10:43:11+0800",
+  "finished_at": "2026-07-22T10:45:00+0800",
+  "elapsed_seconds": 109.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "EG",

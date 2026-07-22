@@ -1,0 +1,15 @@
+{
+  "commodity": "MA",
+  "status": "success_no_events",
+  "started_at": "2026-07-22T11:21:05+0800",
+  "finished_at": "2026-07-22T11:22:08+0800",
+  "elapsed_seconds": 63.0,
+  "event_count": 0,
+  "contract_count": 0,
+  "output_dir": "MA",
+  "event_replay_html": "MA/event_replay_MA.html",
+  "events_csv": "MA/tick_candidate_events.csv",
+  "log_file": "logs/MA.log",
+  "exit_code": 0,
+  "error": null
+}

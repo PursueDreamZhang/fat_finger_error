@@ -1,9 +1,9 @@
 {
   "commodity": "LU",
   "status": "success_no_events",
-  "started_at": "2026-07-20T00:01:15+0800",
-  "finished_at": "2026-07-20T00:04:23+0800",
-  "elapsed_seconds": 188.0,
+  "started_at": "2026-07-22T11:50:58+0800",
+  "finished_at": "2026-07-22T11:53:03+0800",
+  "elapsed_seconds": 125.0,
   "event_count": 0,
   "contract_count": 0,
   "output_dir": "LU",

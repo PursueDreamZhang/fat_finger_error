@@ -1,10 +1,10 @@
 {
   "commodity": "SC",
   "status": "success_with_events",
-  "started_at": "2026-07-20T00:46:49+0800",
-  "finished_at": "2026-07-20T00:50:09+0800",
+  "started_at": "2026-07-22T12:35:24+0800",
+  "finished_at": "2026-07-22T12:38:44+0800",
   "elapsed_seconds": 200.0,
-  "event_count": 4,
+  "event_count": 3,
   "contract_count": 3,
   "output_dir": "SC",
   "event_replay_html": "SC/event_replay_SC.html",

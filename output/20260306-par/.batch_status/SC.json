@@ -1,9 +1,9 @@
 {
   "commodity": "SC",
   "status": "success_with_events",
-  "started_at": "2026-07-19T23:22:19+0800",
-  "finished_at": "2026-07-19T23:26:49+0800",
-  "elapsed_seconds": 270.0,
+  "started_at": "2026-07-22T10:57:32+0800",
+  "finished_at": "2026-07-22T11:02:26+0800",
+  "elapsed_seconds": 294.0,
   "event_count": 4,
   "contract_count": 2,
   "output_dir": "SC",

@@ -1,9 +1,9 @@
 {
   "commodity": "L",
   "status": "success_with_events",
-  "started_at": "2026-07-19T23:32:16+0800",
-  "finished_at": "2026-07-19T23:33:45+0800",
-  "elapsed_seconds": 89.0,
+  "started_at": "2026-07-22T11:17:37+0800",
+  "finished_at": "2026-07-22T11:18:35+0800",
+  "elapsed_seconds": 58.0,
   "event_count": 3,
   "contract_count": 2,
   "output_dir": "L",

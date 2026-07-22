@@ -1,9 +1,9 @@
 {
   "commodity": "EB",
   "status": "success_with_events",
-  "started_at": "2026-07-19T23:14:39+0800",
-  "finished_at": "2026-07-19T23:16:23+0800",
-  "elapsed_seconds": 104.0,
+  "started_at": "2026-07-22T10:42:02+0800",
+  "finished_at": "2026-07-22T10:43:11+0800",
+  "elapsed_seconds": 69.0,
   "event_count": 47,
   "contract_count": 2,
   "output_dir": "EB",
