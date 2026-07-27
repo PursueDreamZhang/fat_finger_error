@@ -1,0 +1,21 @@
+{
+  "source_output": "output/programmatic_grid_smoke_20260302",
+  "generated_for": "2026-03-02 full smoke artifact baseline",
+  "files": {
+    "programmatic_grid_summary.csv": {
+      "data_rows": 24,
+      "sha256": "ca52c83a492d0550ef4fd1e468f52864f29af7dfa14c13b62c24e8fcbb85f537"
+    },
+    "programmatic_grid_daily.csv": {
+      "data_rows": 24,
+      "sha256": "c6c2b5ca1dffe05c01afbd14597255fa1c3b0306b3a2c9a937fac6d252b635a1"
+    },
+    "programmatic_grid_trades.csv": {
+      "data_rows": 711,
+      "sha256": "23a6b0babd04a9aba28e4e1aabeab624c4c35758eecb975cf90133119a13c873"
+    },
+    "programmatic_grid_trade_contexts.json": {
+      "sha256": "5fb7bfbe4bee29d3c028a9e729da7e52cb33260c2eec2ce5ff514941870380ba"
+    }
+  }
+}

@@ -67,6 +67,9 @@ CSV_COLUMNS: list[tuple[str, str]] = [
     ("last_threshold_ticks", "末笔触发阈值_跳"),
     ("vwap_threshold_ticks", "区间均价触发阈值_跳"),
     ("onset_ticks", "突发偏离_跳"),
+    ("event_depth_ticks", "事件确认深度_跳"),
+    ("event_depth_bps", "事件确认深度_基点"),
+    ("depth_source", "确认深度来源"),
     ("interval_delta_volume", "区间增量成交量"),
     ("interval_delta_turnover", "区间增量成交额"),
     ("event_volume", "事件成交量"),
@@ -428,6 +431,8 @@ def _finalize_event_fields(
     ]
     events["last_down_bps"] = events["last_down_ticks"] * tick_size / events["fair_price"] * 10000
     events["vwap_down_bps"] = events["vwap_down_ticks"] * tick_size / events["fair_price"] * 10000
+    events["event_depth_bps"] = events["event_depth_ticks"] * tick_size / events["fair_price"] * 10000
+    events["depth_source"] = "detector_event_depth"
     # 区间增量成交量/额（锚点帧）
     anchor_dv = []
     anchor_dt = []

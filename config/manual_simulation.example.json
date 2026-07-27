@@ -1,0 +1,39 @@
+{
+  "events_csv": "output/20260301_20260331-range/tick_candidate_events_annotated.csv",
+  "tick_data_root": "data/tick2026",
+  "daily_data_root": "data/1d_futures",
+  "output_dir": "output/manual_simulation_ni_fu_v1",
+  "commodities": ["NI", "FU"],
+  "trade_date_start": "20260301",
+  "trade_date_end": "20260331",
+  "quality_exclusions": [
+    {
+      "trade_date": "20260309",
+      "commodity": "M"
+    }
+  ],
+  "account_equity": 100000,
+  "max_margin_ratio": 0.3,
+  "max_single_trade_loss": 500,
+  "default_margin_rate": 0.1,
+  "margin_rate_by_commodity": {
+    "NI": 0.1,
+    "FU": 0.1
+  },
+  "default_commission_per_lot_per_side": 0.0,
+  "commission_by_commodity": {
+    "NI": 0.0,
+    "FU": 0.0
+  },
+  "slippage_ticks": 1,
+  "target_lots": 1,
+  "hedge_lots": 1,
+  "fill_model": "strict_visible",
+  "order_ages_seconds": [300, 900],
+  "entry_distances_bps": [50, 100, 200],
+  "hedge_delays_seconds": [5, 10, 30, 60],
+  "exit_delays_seconds": [5, 10, 30, 60],
+  "event_fill_window_seconds": 1,
+  "max_quote_age_seconds": 3,
+  "hedge_reference_index": 0
+}

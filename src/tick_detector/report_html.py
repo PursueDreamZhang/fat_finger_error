@@ -18,6 +18,8 @@ EVENT_SUMMARY_COLUMNS = [
     ("last_down_ticks", "末笔向下偏离_跳"),
     ("vwap_down_ticks", "区间均价向下偏离_跳"),
     ("onset_ticks", "突发偏离_跳"),
+    ("event_depth_ticks", "事件确认深度_跳"),
+    ("event_depth_bps", "事件确认深度_基点"),
     ("event_volume", "事件成交量"),
     ("recovery_label", "回归标签"),
     ("visible_recovered_seconds", "可见末笔恢复确认秒数"),

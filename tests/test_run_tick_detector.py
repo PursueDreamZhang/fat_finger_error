@@ -200,6 +200,9 @@ def test_run_detection_writes_chinese_csv_headers_even_with_zero_candidates(tmp_
     assert "事件时间" in events.columns
     assert "合理价" in events.columns
     assert "回归标签" in events.columns
+    assert "事件确认深度_跳" in events.columns
+    assert "事件确认深度_基点" in events.columns
+    assert "确认深度来源" in events.columns
     assert len(events) == 0  # 零候选
 
 
@@ -338,6 +341,9 @@ def test_run_detection_au_candidate_includes_chinese_fields(tmp_path):
         row = events.iloc[0]
         assert row["合约"] == "AU2606"
         assert "合理价" in events.columns
+        assert row["确认深度来源"] == "detector_event_depth"
+        assert row["事件确认深度_跳"] == pytest.approx(row["末笔向下偏离_跳"])
+        assert row["事件确认深度_基点"] == pytest.approx(row["事件确认深度_跳"] * 0.02 / row["合理价"] * 10000)
         assert "触发原因" in events.columns
         assert "区间成交均价" in events.columns
         assert "回归标签" in events.columns

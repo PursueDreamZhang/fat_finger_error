@@ -44,6 +44,7 @@ def attach_fair_price_metrics(
     reference_frames: dict[str, pd.DataFrame],
     tick_size: float,
     top_volume_peer_contracts: set[str] | None = None,
+    max_reference_age_seconds: float = MAX_REFERENCE_AGE_SECONDS,
 ) -> pd.DataFrame:
     """为 enriched target frame 写入 fair_price、noise history、阈值与参考质量。
 
@@ -79,7 +80,12 @@ def attach_fair_price_metrics(
             key=lambda code: (-float(reference_frames[code]["Volume"].max()), code),
         )[:3])
 
-    peer_aligned = _build_peer_aligned(out, reference_frames, tick_size)
+    peer_aligned = _build_peer_aligned(
+        out,
+        reference_frames,
+        tick_size,
+        max_reference_age_seconds=max_reference_age_seconds,
+    )
 
     # Pass 1 输出预分配：循环内只写数组，结束后一次性写回 DataFrame。
     # valid_peer_contracts_col / peer_bases_col 保留逐行 list/dict 的对象语义。
@@ -224,6 +230,7 @@ def _build_peer_aligned(
     target_df: pd.DataFrame,
     reference_frames: dict[str, pd.DataFrame],
     tick_size: float,
+    max_reference_age_seconds: float = MAX_REFERENCE_AGE_SECONDS,
 ) -> dict[str, dict[str, np.ndarray]]:
     """为每个 peer 预计算与 target 行索引对齐的 asof mid / spread / diff / 有效性。
 
@@ -260,7 +267,7 @@ def _build_peer_aligned(
         age_ms = keys.astype(np.int64) - matched_keys.astype(np.int64)
         asof_base_valid = (
             has_position
-            & (age_ms <= MAX_REFERENCE_AGE_SECONDS * 1000)
+            & (age_ms <= max_reference_age_seconds * 1000)
             & p_tradable[safe_positions]
             & (matched_bids > 0)
             & (matched_asks > 0)

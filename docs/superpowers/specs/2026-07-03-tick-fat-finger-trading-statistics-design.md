@@ -379,6 +379,10 @@ event_time = 21:04:35.500
 
 检测器稳定后，再单独设计交易统计。不要把下面内容塞回第一版检测器。
 
+当前独立统计设计见：
+
+- `docs/superpowers/specs/2026-07-23-fat-finger-passive-order-hedge-statistics-design.md`
+
 后续可以新增：
 
 - `eligible_contract_days.csv`：统计分母和排除原因。

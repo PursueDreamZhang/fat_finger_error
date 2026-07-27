@@ -1,0 +1,21 @@
+{
+  "config": "config/programmatic_grid.stage0_smoke.json",
+  "result_signature": "8cd70a572a0c0f74eda69f27e7fbd6943b1db1349cc3277cec9f0b6164961083",
+  "files": {
+    "programmatic_grid_summary.csv": {
+      "data_rows": 1,
+      "sha256": "3389fb4dfe04a6e783d6a0b746970f4c850bbbc8767ccfce3c28807c031fcf77"
+    },
+    "programmatic_grid_daily.csv": {
+      "data_rows": 1,
+      "sha256": "99d31acde9ea6d6e1daebf412f1936d199a3e35a950fed733ba19bbd9ea74b9f"
+    },
+    "programmatic_grid_trades.csv": {
+      "data_rows": 1,
+      "sha256": "5f96b279037e060d0c10b8f123d6f3739490ec0d2d61946cd3dc8c34f806d20c"
+    },
+    "programmatic_grid_trade_contexts.json": {
+      "sha256": "0cc54d90a0b476d3a4b0239d6f173c102c1a71f2156dec7fc84621e35c7caf5c"
+    }
+  }
+}
