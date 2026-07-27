@@ -1,6 +1,6 @@
 # 参数候选生成器确认深度改造实施计划
 
-> 2026-07-27 更新：本文记录此前阶段 1–6 的实施过程。现行生成器已精简为每合约一组 T/W/D/S；当前输入与输出契约以 `docs/programmatic_parameter_generator_guide.md` 为准。
+> 2026-07-27 更新：本文记录此前阶段 1–6 的实施过程。现行生成器输出多组 T/W/D/S 组合，但不再负责统计报告或回放准备；当前输入与输出契约以 `docs/programmatic_parameter_generator_guide.md` 为准。
 
 > 前置设计：[2026-07-25-programmatic-grid-parameter-generator-design.md](../specs/2026-07-25-programmatic-grid-parameter-generator-design.md)。本计划只实现 CSV 契约、CSV-only 注释/迁移和生成器纠偏；不重跑原始 Tick 数据，不改全天网格回放逻辑。
 

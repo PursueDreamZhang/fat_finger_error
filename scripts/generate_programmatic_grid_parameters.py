@@ -17,10 +17,10 @@ from src.programmatic_parameter_generator import (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="从检测事件生成每个合约唯一的一组低侧 T/W/D/S")
+    parser = argparse.ArgumentParser(description="从检测事件生成每个合约的低侧 T/W/D/S 组合")
     parser.add_argument("--input", required=True, help="tick_candidate_events_annotated.csv")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--config", help="可选 JSON；覆盖筛选门槛或单组深度公式")
+    parser.add_argument("--config", help="可选 JSON；覆盖筛选门槛或 T/W/S 组合公式")
     args = parser.parse_args()
     shapes = build_parameter_shapes(load_events(args.input), load_parameter_generator_config(args.config))
     print(f"shapes={write_parameter_shapes(shapes, args.output_dir).resolve()}")

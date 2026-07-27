@@ -63,15 +63,15 @@ def test_range_binding_metadata_must_be_consistent_and_sha256_shaped():
         build_parameter_shapes(events)
 
 
-def test_each_contract_gets_exactly_one_p70_shape():
+def test_each_contract_gets_p50_p70_p85_and_w_s_combinations():
     shapes = build_parameter_shapes(_events())
     assert list(shapes.columns) == ["commodity", "target_contract", "T_ticks", "W_ticks", "D_ticks", "S_ticks"]
-    assert shapes.to_dict("records") == [{
-        "commodity": "NI", "target_contract": "NI2605", "T_ticks": 7, "W_ticks": 3, "D_ticks": 4, "S_ticks": 2,
-    }]
+    assert len(shapes) == 12
+    assert set(shapes["T_ticks"]) == {6, 7, 8}
+    assert (shapes["T_ticks"] == shapes["W_ticks"] + shapes["D_ticks"]).all()
 
 
-def test_onset_and_bps_do_not_change_the_single_shape():
+def test_onset_and_bps_do_not_change_the_shapes():
     left = build_parameter_shapes(_events())
     changed = _events()
     changed["突发偏离_跳"] = 999.0
@@ -83,32 +83,40 @@ def test_invalid_events_are_filtered_and_insufficient_contracts_are_omitted():
     events = _events()
     events.loc[0, "事件确认深度_跳"] = float("nan")
     other = _events(rows=4, contract="NI2606")
-    assert build_parameter_shapes(pd.concat([events, other], ignore_index=True)).empty
+    assert build_parameter_shapes(pd.concat([events, other], ignore_index=True), ParameterGeneratorConfig(min_eligible_samples=8)).empty
 
 
 def test_missing_depth_source_is_not_a_usable_event():
     events = _events()
     events.loc[0, "确认深度来源"] = pd.NA
-    assert build_parameter_shapes(events).empty
+    assert build_parameter_shapes(events, ParameterGeneratorConfig(min_eligible_samples=8)).empty
 
 
 @pytest.mark.parametrize("kwargs", [
     {"min_eligible_samples": 0},
-    {"total_touch_quantile": 0},
-    {"total_touch_quantile": 1},
-    {"width_ratio": 0},
-    {"width_ratio": 1},
+    {"total_touch_quantiles": (0,)},
+    {"total_touch_quantiles": (1,)},
+    {"width_ratios": (0,)},
+    {"width_ratios": (1,)},
+    {"step_ratios": (0,)},
+    {"step_ratios": (1.1,)},
 ])
-def test_parameter_config_rejects_invalid_single_shape_values(kwargs):
+def test_parameter_config_rejects_invalid_combination_values(kwargs):
     with pytest.raises(ValueError):
         ParameterGeneratorConfig(**kwargs)
 
 
-def test_json_config_can_change_the_single_shape_quantile(tmp_path):
+def test_json_config_can_limit_combination_dimensions(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"total_touch_quantile": 0.5}), encoding="utf-8")
+    path.write_text(json.dumps({"total_touch_quantiles": [0.5], "width_ratios": [0.4], "step_ratios": [0.5]}), encoding="utf-8")
     shapes = build_parameter_shapes(_events(), load_parameter_generator_config(path))
     assert shapes.iloc[0]["T_ticks"] == 6
+    assert len(shapes) == 1
+
+
+def test_default_threshold_is_four_eligible_events():
+    assert not build_parameter_shapes(_events(rows=4)).empty
+    assert build_parameter_shapes(_events(rows=3)).empty
 
 
 def test_output_is_one_csv_with_only_contract_and_shape_columns(tmp_path):
