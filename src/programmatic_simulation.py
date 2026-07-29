@@ -47,7 +47,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "detector_event_window_ms": 1000,
     "account_equity": 100000.0,
     "max_margin_ratio": 0.30,
-    "max_single_trade_loss": 500.0,
     "default_margin_rate": 0.10,
     "margin_rate_by_commodity": {},
     "default_commission_per_lot_per_side": 0.0,
@@ -59,22 +58,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "reanchor_step_ticks": 10,
     "reanchor_confirm_ms": 1000,
     "resume_confirm_ms": 2000,
-    "fair_invalid_confirm_ms": 1000,
     "min_reprice_interval_ms": 1000,
     "max_order_actions_per_minute": 20,
     "cancel_ack_latency_ms": 500,
     "new_order_ack_latency_ms": 500,
     "hedge_submit_latency_ms": 500,
     "max_hedge_wait_ms": 2000,
+    "hedged_exit_delay_ms": 2000,
     "max_quote_age_ms": 3000,
     "max_fair_age_ms": 3000,
     "max_data_gap_ms": 3000,
     "fill_model": "observable_cross_assumed",
     "require_top_of_book_full_lot": True,
-    "slippage_ticks": 1.0,
-    "reversion_exit_ratio": 0.20,
-    "take_profit_amount": 0.0,
-    "max_hold_ms": 60000,
     "cooldown_ms": 1000,
 }
 
@@ -203,7 +198,6 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     config["detector_event_window_ms"] = _nonnegative_int(config.get("detector_event_window_ms"), "detector_event_window_ms")
     config["account_equity"] = _positive_number(config.get("account_equity"), "account_equity")
     config["max_margin_ratio"] = _fraction(config.get("max_margin_ratio"), "max_margin_ratio")
-    config["max_single_trade_loss"] = _positive_number(config.get("max_single_trade_loss"), "max_single_trade_loss")
     config["default_margin_rate"] = _positive_number(config.get("default_margin_rate"), "default_margin_rate")
     config["margin_rate_by_commodity"] = _number_map(config.get("margin_rate_by_commodity"), "margin_rate_by_commodity", allow_zero=False)
     config["default_commission_per_lot_per_side"] = _nonnegative_number(
@@ -218,19 +212,19 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     for key in (
         "reanchor_confirm_ms",
         "resume_confirm_ms",
-        "fair_invalid_confirm_ms",
         "min_reprice_interval_ms",
         "cancel_ack_latency_ms",
         "new_order_ack_latency_ms",
         "hedge_submit_latency_ms",
         "max_hedge_wait_ms",
+        "hedged_exit_delay_ms",
         "cooldown_ms",
     ):
         config[key] = _nonnegative_int(config.get(key), key)
     config["max_order_actions_per_minute"] = _positive_int(
         config.get("max_order_actions_per_minute"), "max_order_actions_per_minute"
     )
-    for key in ("max_quote_age_ms", "max_fair_age_ms", "max_data_gap_ms", "max_hold_ms"):
+    for key in ("max_quote_age_ms", "max_fair_age_ms", "max_data_gap_ms"):
         config[key] = _positive_int(config.get(key), key)
     config["fill_model"] = str(config.get("fill_model") or "").strip()
     if config["fill_model"] not in FILL_MODELS:
@@ -238,9 +232,6 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     config["require_top_of_book_full_lot"] = _as_bool(
         config.get("require_top_of_book_full_lot"), "require_top_of_book_full_lot"
     )
-    config["slippage_ticks"] = _nonnegative_number(config.get("slippage_ticks"), "slippage_ticks")
-    config["reversion_exit_ratio"] = _fraction_or_zero(config.get("reversion_exit_ratio"), "reversion_exit_ratio")
-    config["take_profit_amount"] = _nonnegative_number(config.get("take_profit_amount"), "take_profit_amount")
     return config
 
 
@@ -366,7 +357,8 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
     warnings = [
         "这是基于约 500ms 快照的全天状态机回放；observable_cross_assumed 不是交易所成交回报。",
         "fair_reference_contracts 由配置显式冻结，未按当天最终成交量选参考合约。",
-        "成交后参考腿、退出腿均按当时可见买卖一加滑点估算，未还原盘口队列位置。",
+        "fair 失效时以目标合约最新成交价兜底驱动挂单/重定锚；乌龙指尖刺期间锚点可能追随尖刺，挂单或被带至尖刺尾部。",
+        "所有成交腿（对冲参考腿、退出腿）与盯市浮亏均按可见买卖一档价估算（不加滑点），未还原盘口队列位置。",
     ]
     if config["events_csv"]:
         warnings.append("候选事件 CSV 只用于成交后的 detector_event_fill 标签，不参与任何状态转移。")
@@ -435,7 +427,6 @@ class _DayReplay:
         self.reanchor_direction = ""
         self.reanchor_started_key: int | None = None
         self.fair_recovered_since_key: int | None = None
-        self.fair_invalid_since_key: int | None = None
         self.last_row: Mapping[str, Any] | None = None
 
     def run(self) -> dict[str, pd.DataFrame]:
@@ -460,7 +451,7 @@ class _DayReplay:
                     if fill is not None:
                         self._open_trade(row, *fill)
                     else:
-                        self._manage_flat_state(row, data_gap=False)
+                        self._manage_flat_state(row)
             else:
                 opposite_fill = self._first_target_fill(row)
                 if opposite_fill is not None:
@@ -704,26 +695,25 @@ class _DayReplay:
     # 平仓状态：fair 驱动锚点与撤改单
     # ------------------------------------------------------------------
 
-    def _manage_flat_state(self, row: pd.Series, *, data_gap: bool) -> None:
+    def _manage_flat_state(self, row: pd.Series) -> None:
         key = _row_key(row)
         if key is None:
             return
+        # 非交易时段或开盘保护：暂停，不挂单。
+        if not _row_bool(row, "is_tradable_session", True) or _row_bool(row, "is_open_protected", False):
+            self._pause(row, "fair_invalid_or_session_guard")
+            return
+        # fair 可用就用 fair；失效则用最新成交价兜底，继续驱动挂单/重定锚，不撤单罢工。
+        # 注意：LastPrice 是目标合约自身价格，乌龙指尖刺时会驱动重定锚追随尖刺，
+        # 极端行情下挂单可能被带至尖刺尾部——这是“fair 失效不罢工”的已知代价。
         fair = _valid_fair(row)
-        if data_gap:
-            self._pause(row, "data_gap")
-            return
         if fair is None:
-            self.fair_recovered_since_key = None
-            if self.state in {"PAUSED", "COOLDOWN"}:
+            last = _finite_number(row.get("LastPrice"))
+            if last is not None and math.isfinite(last) and last > 0:
+                fair = _round_to_tick(last, self.target_tick)
+            else:
                 self._pause(row, "fair_invalid_or_session_guard")
                 return
-            if self.fair_invalid_since_key is None:
-                self.fair_invalid_since_key = key
-                return
-            if key - self.fair_invalid_since_key >= int(self.config["fair_invalid_confirm_ms"]):
-                self._pause(row, "fair_invalid_or_session_guard")
-            return
-        self.fair_invalid_since_key = None
         if self.state == "PAUSED":
             if not self._has_live_target_orders() and key >= self.cooldown_until_key:
                 self._resume_if_stable(row, fair)
@@ -742,7 +732,6 @@ class _DayReplay:
         self.reanchor_direction = ""
         self.reanchor_started_key = None
         self.fair_recovered_since_key = None
-        self.fair_invalid_since_key = None
         if self.state == "COOLDOWN":
             self._record_transition(row, "PAUSED", reason)
 
@@ -894,6 +883,7 @@ class _DayReplay:
             "hedge_open": False,
             "hedge_due_key": key + int(self.config["hedge_submit_latency_ms"]),
             "hedge_deadline_key": key + int(self.config["max_hedge_wait_ms"]),
+            "hedge_exit_due_key": key + int(self.config["hedged_exit_delay_ms"]),
             "hedge_entry_key": np.nan,
             "hedge_entry_price": np.nan,
             "target_exit_price": np.nan,
@@ -937,13 +927,8 @@ class _DayReplay:
         if key is None:
             return
         if self.state in {"LONG_PENDING_HEDGE", "SHORT_PENDING_HEDGE"}:
+            # 对冲未完成：记录最差浮亏（不触发止损）；尝试对冲；超时则直接平目标腿。
             self._update_worst_mark(row)
-            unhedged_mark = self._mark_pnl(row)
-            if unhedged_mark is not None and unhedged_mark - self._estimated_unhedged_exit_commission() <= -float(self.config["max_single_trade_loss"]):
-                self.trade["exit_reason"] = "unhedged_stop_loss"
-                self._record_transition(row, "EMERGENCY_FLATTEN", "unhedged_stop_loss")
-                self._try_flatten(row)
-                return
             if key >= int(self.trade["hedge_due_key"]):
                 self._try_hedge(row)
             if self.trade is not None and not self.trade["hedge_open"] and key >= int(self.trade["hedge_deadline_key"]):
@@ -952,11 +937,11 @@ class _DayReplay:
                 self._try_flatten(row)
             return
         if self.state == "HEDGED_POSITION":
+            # 对冲已成交：到延迟时点直接平两腿，不看 fair。
             self._update_worst_mark(row)
-            reason = self._position_exit_reason(row)
-            if reason:
-                self.trade["exit_reason"] = reason
-                self._record_transition(row, "FLATTENING", reason)
+            if key >= int(self.trade["hedge_exit_due_key"]):
+                self.trade["exit_reason"] = "hedged_exit"
+                self._record_transition(row, "FLATTENING", "hedged_exit")
                 self._try_flatten(row)
             return
         if self.state in {"FLATTENING", "EMERGENCY_FLATTEN"}:
@@ -980,7 +965,7 @@ class _DayReplay:
                 order["quote_missing_logged"] = True
                 self._log_order(row, order, "quote_unavailable")
             return
-        price = _aggressive_price(float(quote["price"]), direction, self.hedge_tick, float(self.config["slippage_ticks"]))
+        price = float(quote["price"])
         if price <= 0:
             return
         if self._margin_for_hedge_entry(price) > float(self.config["account_equity"]) * float(self.config["max_margin_ratio"]):
@@ -994,6 +979,7 @@ class _DayReplay:
         order["price"] = price
         self._log_order(row, order, "fill", f"quote_key={quote['key']}")
         self.trade["hedge_entry_key"] = key
+        self.trade["hedge_exit_due_key"] = key + int(self.config["hedged_exit_delay_ms"])
         self.trade["hedge_entry_price"] = price
         self.trade["hedge_open"] = True
         self.trade["gross_margin"] = self._actual_margin()
@@ -1002,34 +988,6 @@ class _DayReplay:
     # ------------------------------------------------------------------
     # 盯市、退出与记账
     # ------------------------------------------------------------------
-
-    def _position_exit_reason(self, row: pd.Series) -> str | None:
-        if self.trade is None:
-            return None
-        key = _row_key(row)
-        if key is None:
-            return None
-        fair = _valid_fair(row)
-        if fair is None:
-            return "reference_invalid_exit"
-        mark = self._mark_pnl(row)
-        estimated_net = mark - self._commission() if mark is not None else None
-        if estimated_net is not None and estimated_net <= -float(self.config["max_single_trade_loss"]):
-            return "stop_loss"
-        if (
-            estimated_net is not None
-            and float(self.config["take_profit_amount"]) > 0
-            and estimated_net >= float(self.config["take_profit_amount"])
-        ):
-            return "take_profit"
-        mid = _mid_price(row)
-        if math.isfinite(mid):
-            residual = fair - mid if self.trade["direction"] == "long" else mid - fair
-            if residual <= float(self.trade["entry_residual_ticks"]) * self.target_tick * float(self.config["reversion_exit_ratio"]):
-                return "reversion_exit"
-        if key - int(self.trade["fill_key"]) >= int(self.config["max_hold_ms"]):
-            return "time_exit"
-        return None
 
     def _new_aggressive_order(
         self,
@@ -1071,7 +1029,7 @@ class _DayReplay:
                 self.trade["target_exit_order"] = order
             quote = _row_quote(row, direction, int(self.config["target_lots"]), bool(self.config["require_top_of_book_full_lot"]))
             if quote is not None:
-                price = _aggressive_price(float(quote["price"]), direction, self.target_tick, float(self.config["slippage_ticks"]))
+                price = float(quote["price"])
                 if price > 0:
                     order["status"] = "filled"
                     order["price"] = price
@@ -1092,7 +1050,7 @@ class _DayReplay:
                 self.trade["hedge_exit_order"] = order
             quote = self._asof_quote(key, direction, int(self.config["hedge_lots"]))
             if quote is not None:
-                price = _aggressive_price(float(quote["price"]), direction, self.hedge_tick, float(self.config["slippage_ticks"]))
+                price = float(quote["price"])
                 if price > 0:
                     order["status"] = "filled"
                     order["price"] = price
@@ -1116,7 +1074,7 @@ class _DayReplay:
             quote = _row_quote(row, side, int(self.config["target_lots"]), bool(self.config["require_top_of_book_full_lot"]))
             if quote is None:
                 return None
-            target_price = _aggressive_price(float(quote["price"]), side, self.target_tick, float(self.config["slippage_ticks"]))
+            target_price = float(quote["price"])
         if target_price is None:
             return None
         hedge_price = _finite_number(self.trade.get("hedge_exit_price"))
@@ -1128,7 +1086,7 @@ class _DayReplay:
             quote = self._asof_quote(key, side, int(self.config["hedge_lots"]))
             if quote is None:
                 return None
-            hedge_price = _aggressive_price(float(quote["price"]), side, self.hedge_tick, float(self.config["slippage_ticks"]))
+            hedge_price = float(quote["price"])
         return self._pnl(float(target_price), hedge_price)
 
     def _pnl(self, target_exit_price: float, hedge_exit_price: float | None) -> float:
@@ -1194,15 +1152,6 @@ class _DayReplay:
             _finite_number(self.trade.get("hedge_exit_price")) is not None
         )
         return per_side * (target_sides * int(self.config["target_lots"]) + hedge_sides * int(self.config["hedge_lots"]))
-
-    def _estimated_unhedged_exit_commission(self) -> float:
-        per_side = _commodity_number(
-            self.config,
-            "commission_by_commodity",
-            "default_commission_per_lot_per_side",
-            self.commodity,
-        )
-        return 2.0 * per_side * int(self.config["target_lots"])
 
     def _finalize_trade(self, row: pd.Series, reason: str, *, unclosed: bool = False) -> None:
         if self.trade is None:
@@ -1382,20 +1331,6 @@ def _valid_fair(row: pd.Series) -> float | None:
 def _fair_price(row: pd.Series) -> float:
     value = _finite_number(row.get("fair_price"))
     return value if value is not None else np.nan
-
-
-def _mid_price(row: pd.Series) -> float:
-    mid = _finite_number(row.get("mid_price"))
-    if mid is not None:
-        return mid
-    bid = _finite_number(row.get("BidPrice1"))
-    ask = _finite_number(row.get("AskPrice1"))
-    return (bid + ask) / 2.0 if bid is not None and ask is not None and bid > 0 and ask >= bid else np.nan
-
-
-def _aggressive_price(price: float, side: str, tick_size: float, slippage_ticks: float) -> float:
-    adjusted = price + slippage_ticks * tick_size if side == "buy" else price - slippage_ticks * tick_size
-    return _round_to_tick(adjusted, tick_size)
 
 
 def _row_key(row: pd.Series) -> int | None:
@@ -1786,13 +1721,6 @@ def _nonnegative_int(value: Any, name: str) -> int:
 
 def _fraction(value: Any, name: str) -> float:
     result = _positive_number(value, name)
-    if result > 1:
-        raise ValueError(f"{name} 必须小于等于 1")
-    return result
-
-
-def _fraction_or_zero(value: Any, name: str) -> float:
-    result = _nonnegative_number(value, name)
     if result > 1:
         raise ValueError(f"{name} 必须小于等于 1")
     return result

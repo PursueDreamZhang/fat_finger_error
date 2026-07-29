@@ -39,7 +39,6 @@ GRID_SCENARIO_COLUMNS = [
     "reanchor_step_ticks",
     "reanchor_confirm_ms",
     "resume_confirm_ms",
-    "fair_invalid_confirm_ms",
     "cancel_ack_latency_ms",
     "new_order_ack_latency_ms",
     "hedge_submit_latency_ms",
@@ -153,7 +152,7 @@ def normalize_programmatic_grid_config(raw: Mapping[str, Any]) -> dict[str, Any]
         "min_event_fills": int(config.get("min_event_fills", 1)),
         "max_normal_move_fill_rate": float(config.get("max_normal_move_fill_rate", 0.25)),
         "max_hedge_failure_rate": float(config.get("max_hedge_failure_rate", 0.10)),
-        "max_daily_loss": float(config.get("max_daily_loss", base["max_single_trade_loss"])),
+        "max_daily_loss": float(config.get("max_daily_loss", 500.0)),
         "max_peak_order_actions_per_minute": int(
             config.get("max_peak_order_actions_per_minute", base["max_order_actions_per_minute"])
         ),
@@ -201,7 +200,6 @@ def build_grid_scenarios(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "reanchor_step_ticks": float(shape["S"]),
                 "reanchor_confirm_ms": int(latency.get("reanchor_confirm_ms", 1000)),
                 "resume_confirm_ms": int(latency.get("resume_confirm_ms", 2000)),
-                "fair_invalid_confirm_ms": int(latency.get("fair_invalid_confirm_ms", 1000)),
                 "cancel_ack_latency_ms": int(latency.get("cancel_ack_latency_ms", 500)),
                 "new_order_ack_latency_ms": int(latency.get("new_order_ack_latency_ms", 500)),
                 "hedge_submit_latency_ms": int(latency.get("hedge_submit_latency_ms", 500)),
@@ -771,7 +769,7 @@ const data=JSON.parse(document.getElementById('grid-payload').textContent);
 const reasonLabels={insufficient_fills:'成交次数不足',insufficient_detector_event_fills:'候选事件成交不足',normal_move_fill_rate_too_high:'正常行情误成交过高',hedge_failure_rate_too_high:'对冲失败率过高',daily_loss_too_high:'单日亏损超限',order_action_limit_exceeded:'报撤动作超限',net_pnl_not_positive:'净收益不为正'};
 const eventLabels={detector_event_fill:'候选事件成交',normal_move_fill:'正常行情成交'};
 const statusLabels={closed:'已正常退出',hedge_failure_exit:'对冲失败退出',capital_limit_exit:'保证金限制退出',unclosed_end_of_day:'收盘未平'};
-const exitLabels={reversion_exit:'回归退出',take_profit:'止盈退出',max_hold:'最长持有退出',time_exit:'最长持有退出',emergency_flatten:'紧急平仓',hedge_failure:'对冲失败',hedge_failure_exit:'对冲失败退出',reference_invalid_exit:'参考价格失效退出'};
+const exitLabels={hedged_exit:'对冲后平仓',emergency_flatten:'紧急平仓',hedge_failure:'对冲失败',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
 const evidenceLabels={last_trade:'LastPrice',interval_vwap:'区间均价',top_of_book:'买卖一'};
 const keyOf=r=>r.instrument+'::'+r.scenario_id;
 const number=v=>v===null||v===undefined||Number.isNaN(Number(v))?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2});

@@ -62,7 +62,6 @@ def _config(**overrides: object) -> dict[str, object]:
         {
             "account_equity": 100000,
             "max_margin_ratio": 0.3,
-            "max_single_trade_loss": 500,
             "default_margin_rate": 0.1,
             "default_commission_per_lot_per_side": 0,
             "target_lots": 1,
@@ -72,7 +71,6 @@ def _config(**overrides: object) -> dict[str, object]:
             "reanchor_step_ticks": 10,
             "reanchor_confirm_ms": 500,
             "resume_confirm_ms": 0,
-            "fair_invalid_confirm_ms": 1000,
             "min_reprice_interval_ms": 0,
             "max_order_actions_per_minute": 20,
             "cancel_ack_latency_ms": 0,
@@ -83,9 +81,7 @@ def _config(**overrides: object) -> dict[str, object]:
             "max_data_gap_ms": 3000,
             "fill_model": "observable_cross_assumed",
             "require_top_of_book_full_lot": True,
-            "slippage_ticks": 0,
-            "reversion_exit_ratio": 0.2,
-            "max_hold_ms": 10000,
+            "hedged_exit_delay_ms": 0,
             "cooldown_ms": 10000,
         }
     )
@@ -322,7 +318,7 @@ def test_single_bad_fair_snapshot_does_not_create_a_cancel_and_requote_cycle():
     result = simulate_programmatic_day(
         target,
         _hedge(),
-        _config(fair_invalid_confirm_ms=1000),
+        _config(),
         trade_date="20260302",
     )
 
@@ -378,3 +374,46 @@ def test_summary_counts_only_real_reanchors_and_not_the_initial_paused_state():
     assert summary["reprice_count"] == 2
     assert summary["pause_count"] == 1
     assert summary["peak_order_actions_per_minute"] == 2
+
+
+def test_hedged_exit_defers_flatten_until_delay():
+    """对冲成交后须等 hedged_exit_delay_ms 才平两腿。"""
+    target = _frame(
+        "NI2605",
+        [
+            _row(0),
+            _row(500),
+            _row(1000, last=80, vwap=80, bid=79, ask=80),
+            _row(1500, last=100, vwap=100, bid=100, ask=101),
+            _row(2000, last=100, vwap=100, bid=100, ask=101),
+            _row(2500, last=100, vwap=100, bid=100, ask=101),
+            _row(3000, last=100, vwap=100, bid=100, ask=101),
+        ],
+    )
+    result = simulate_programmatic_day(
+        target, _hedge(), _config(hedged_exit_delay_ms=1000), trade_date="20260302"
+    )
+    trades = result["trades"]
+    assert len(trades) == 1
+    trade = trades.iloc[0]
+    assert trade["exit_reason"] == "hedged_exit"
+    assert int(trade["exit_key"]) - int(trade["hedge_entry_key"]) >= 1000
+
+
+def test_fair_invalid_falls_back_to_last_price_for_quoting():
+    """fair 失效时用最新成交价兜底继续报价，不 pause。"""
+    target = _frame(
+        "NI2605",
+        [
+            _row(0, reliable=False, last=100),
+            _row(500, reliable=False, last=100),
+            _row(1000, reliable=False, last=100),
+            _row(1500, reliable=False, last=100),
+        ],
+    )
+    result = simulate_programmatic_day(
+        target, _hedge(), _config(resume_confirm_ms=0), trade_date="20260302"
+    )
+    states = result["transitions"]["to_state"].tolist()
+    assert "FLAT_QUOTING" in states
+    assert "fair_invalid_or_session_guard" not in result["transitions"]["reason"].tolist()

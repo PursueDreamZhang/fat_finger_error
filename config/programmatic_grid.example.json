@@ -6,13 +6,20 @@
     "trade_date_start": "20260301",
     "trade_date_end": "20260331",
     "events_csv": "output/20260301_20260331-range/tick_candidate_events_annotated.csv",
-    "quality_exclusions": [{"trade_date": "20260309", "commodity": "M"}],
+    "quality_exclusions": [
+      {
+        "trade_date": "20260309",
+        "commodity": "M"
+      }
+    ],
     "detector_event_window_ms": 1000,
     "account_equity": 100000,
-    "max_margin_ratio": 0.30,
-    "max_single_trade_loss": 500,
-    "default_margin_rate": 0.10,
-    "margin_rate_by_commodity": {"NI": 0.10, "FU": 0.10},
+    "max_margin_ratio": 0.3,
+    "default_margin_rate": 0.1,
+    "margin_rate_by_commodity": {
+      "NI": 0.1,
+      "FU": 0.1
+    },
     "target_lots": 1,
     "hedge_lots": 1,
     "max_order_actions_per_minute": 20,
@@ -21,10 +28,6 @@
     "max_data_gap_ms": 3000,
     "fill_model": "observable_cross_assumed",
     "require_top_of_book_full_lot": true,
-    "slippage_ticks": 1,
-    "reversion_exit_ratio": 0.20,
-    "take_profit_amount": 0,
-    "max_hold_ms": 60000,
     "cooldown_ms": 1000
   },
   "instruments": [
@@ -32,32 +35,77 @@
       "name": "NI2605",
       "commodity": "NI",
       "target_contract": "NI2605",
-      "fair_reference_contracts": ["NI2604", "NI2609", "NI2607"],
+      "fair_reference_contracts": [
+        "NI2604",
+        "NI2609",
+        "NI2607"
+      ],
       "hedge_contract": "NI2604"
     },
     {
       "name": "FU2606",
       "commodity": "FU",
       "target_contract": "FU2606",
-      "fair_reference_contracts": ["FU2605", "FU2609", "FU2607"],
+      "fair_reference_contracts": [
+        "FU2605",
+        "FU2609",
+        "FU2607"
+      ],
       "hedge_contract": "FU2605"
     }
   ],
   "quote_shapes": [
-    {"W": 5, "D": 5, "S": 5},
-    {"W": 10, "D": 10, "S": 10},
-    {"W": 20, "D": 20, "S": 10},
-    {"W": 50, "D": 50, "S": 50}
+    {
+      "W": 5,
+      "D": 5,
+      "S": 5
+    },
+    {
+      "W": 10,
+      "D": 10,
+      "S": 10
+    },
+    {
+      "W": 20,
+      "D": 20,
+      "S": 10
+    },
+    {
+      "W": 50,
+      "D": 50,
+      "S": 50
+    }
   ],
   "latency_profiles": [
-    {"reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000, "cancel_ack_latency_ms": 500, "new_order_ack_latency_ms": 500, "hedge_submit_latency_ms": 500, "max_hedge_wait_ms": 2000},
-    {"reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000, "cancel_ack_latency_ms": 1000, "new_order_ack_latency_ms": 1000, "hedge_submit_latency_ms": 1000, "max_hedge_wait_ms": 3000},
-    {"reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000, "cancel_ack_latency_ms": 1000, "new_order_ack_latency_ms": 1000, "hedge_submit_latency_ms": 2000, "max_hedge_wait_ms": 5000}
+    {
+      "reanchor_confirm_ms": 1000,
+      "resume_confirm_ms": 2000,
+      "cancel_ack_latency_ms": 500,
+      "new_order_ack_latency_ms": 500,
+      "hedge_submit_latency_ms": 500,
+      "max_hedge_wait_ms": 2000
+    },
+    {
+      "reanchor_confirm_ms": 1000,
+      "resume_confirm_ms": 2000,
+      "cancel_ack_latency_ms": 1000,
+      "new_order_ack_latency_ms": 1000,
+      "hedge_submit_latency_ms": 1000,
+      "max_hedge_wait_ms": 3000
+    },
+    {
+      "reanchor_confirm_ms": 1000,
+      "resume_confirm_ms": 2000,
+      "cancel_ack_latency_ms": 1000,
+      "new_order_ack_latency_ms": 1000,
+      "hedge_submit_latency_ms": 2000,
+      "max_hedge_wait_ms": 5000
+    }
   ],
   "min_fills": 3,
   "min_event_fills": 1,
   "max_normal_move_fill_rate": 0.25,
-  "max_hedge_failure_rate": 0.10,
+  "max_hedge_failure_rate": 0.1,
   "max_daily_loss": 500,
   "max_peak_order_actions_per_minute": 20
 }
