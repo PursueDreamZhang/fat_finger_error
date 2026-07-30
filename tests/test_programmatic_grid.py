@@ -4,14 +4,16 @@ import pytest
 import src.programmatic_grid as programmatic_grid
 from src.programmatic_grid import (
     GRID_SUMMARY_COLUMNS,
-    _context_rows,
     _render_grid_report,
-    build_grid_trade_contexts,
     build_grid_scenarios,
     normalize_programmatic_grid_config,
     _summarize_scenario,
     _stable_sorted_frame,
     run_programmatic_grid,
+)
+from src.programmatic_simulation import (
+    _context_rows,
+    build_trade_contexts,
 )
 
 
@@ -172,7 +174,7 @@ def test_trade_context_keeps_full_holding_window_and_asof_references():
         "instrument": "NI2605", "scenario_id": "Q01-L01", "trade_id": "t1",
         "fill_key": 10000, "hedge_entry_key": 11000, "exit_key": 20000,
     }])
-    contexts = build_grid_trade_contexts(
+    contexts = build_trade_contexts(
         trades, target, {"NI2604": reference, "NI2609": reference},
         {"fair_reference_contracts": ["NI2604", "NI2609"], "hedge_contract": "NI2604"},
     )

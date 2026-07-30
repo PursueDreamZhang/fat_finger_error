@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(python:*)",
-      "Bash(\"/Users/zhangchunfu/Nutstore Files/code/python/myenv/bin/python\" test_fix.py)"
+      "Bash(\"/Users/zhangchunfu/Nutstore Files/code/python/myenv/bin/python\" test_fix.py)",
+      "Bash(./venv/bin/python -c \"import src.programmatic_simulation, src.programmatic_grid; print\\('import ok'\\)\")",
+      "Bash(./venv/bin/python -m pytest tests/test_programmatic_grid.py tests/test_programmatic_simulation.py -q)",
+      "Bash(./venv/bin/python -m pytest tests/ -q)"
     ]
   }
 }

@@ -1,0 +1,60 @@
+{
+  "config": {
+    "tick_data_root": "data/tick2026",
+    "daily_data_root": "data/1d_futures",
+    "output_dir": "output/programmatic_simulation_ap605_20260302",
+    "trade_date_start": "20260302",
+    "trade_date_end": "20260302",
+    "commodity": "AP",
+    "target_contract": "AP605",
+    "fair_reference_contracts": [
+      "AP604",
+      "AP610"
+    ],
+    "hedge_contract": "AP604",
+    "events_csv": "output/20260301_20260331-range/tick_candidate_events_annotated.csv",
+    "quality_exclusions": [],
+    "detector_event_window_ms": 1000,
+    "account_equity": 100000.0,
+    "max_margin_ratio": 0.3,
+    "max_single_trade_loss": 500.0,
+    "default_margin_rate": 0.1,
+    "margin_rate_by_commodity": {
+      "AP": 0.1
+    },
+    "default_commission_per_lot_per_side": 0.0,
+    "commission_by_commodity": {
+      "AP": 0.0
+    },
+    "target_lots": 1,
+    "hedge_lots": 1,
+    "band_half_width_ticks": 34.0,
+    "outer_quote_offset_ticks": 51.0,
+    "reanchor_step_ticks": 17.0,
+    "reanchor_confirm_ms": 1000,
+    "resume_confirm_ms": 1000,
+    "fair_invalid_confirm_ms": 1000,
+    "min_reprice_interval_ms": 1000,
+    "max_order_actions_per_minute": 20,
+    "cancel_ack_latency_ms": 1000,
+    "new_order_ack_latency_ms": 1000,
+    "hedge_submit_latency_ms": 1000,
+    "max_hedge_wait_ms": 1000,
+    "max_quote_age_ms": 3000,
+    "max_fair_age_ms": 3000,
+    "max_data_gap_ms": 3000,
+    "fill_model": "observable_cross_assumed",
+    "require_top_of_book_full_lot": true,
+    "slippage_ticks": 1.0,
+    "reversion_exit_ratio": 0.2,
+    "take_profit_amount": 0.0,
+    "max_hold_ms": 60000,
+    "cooldown_ms": 1000
+  },
+  "warnings": [
+    "这是基于约 500ms 快照的全天状态机回放；observable_cross_assumed 不是交易所成交回报。",
+    "fair_reference_contracts 由配置显式冻结，未按当天最终成交量选参考合约。",
+    "成交后参考腿、退出腿均按当时可见买卖一加滑点估算，未还原盘口队列位置。",
+    "候选事件 CSV 只用于成交后的 detector_event_fill 标签，不参与任何状态转移。"
+  ]
+}

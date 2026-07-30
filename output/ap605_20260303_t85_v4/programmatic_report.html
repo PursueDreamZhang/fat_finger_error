@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>乌龙指程序化状态机回放</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; margin: 28px; color: #202124; }
+.muted { color: #5f6368; } .warning { background: #fff7e6; border-left: 4px solid #e37400; padding: 12px 16px; margin: 20px 0; }
+pre { background: #f6f8fa; padding: 14px; overflow: auto; } table { border-collapse: collapse; font-size: 12px; }
+th, td { border: 1px solid #dfe3e8; padding: 6px 8px; white-space: nowrap; } th { background: #f6f8fa; } .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>乌龙指程序化状态机回放</h1>
+<p class="muted">全天快照分母；候选事件只作事后标签。详细状态、订单和交易见同目录 CSV。</p>
+<div class="warning"><strong>结果边界</strong><ul><li>这是基于约 500ms 快照的全天状态机回放；observable_cross_assumed 不是交易所成交回报。</li><li>fair_reference_contracts 由配置显式冻结，未按当天最终成交量选参考合约。</li><li>fair 失效时以目标合约最新成交价兜底驱动挂单/重定锚；乌龙指尖刺期间锚点可能追随尖刺，挂单或被带至尖刺尾部。</li><li>所有成交腿（对冲参考腿、退出腿）与盯市浮亏均按可见买卖一档价估算（不加滑点），未还原盘口队列位置。</li><li>候选事件 CSV 只用于成交后的 detector_event_fill 标签，不参与任何状态转移。</li><li>存在收盘前无法按可见盘口平完的仓位，相关记录不应作为可实现收益。</li></ul></div>
+<h2>汇总</h2><div class="scroll"><table class="dataframe summary">
+  <thead>
+    <tr style="text-align: left;">
+      <th>scope</th>
+      <th>trade_date</th>
+      <th>target_contract</th>
+      <th>fill_count</th>
+      <th>detector_event_fill_count</th>
+      <th>normal_move_fill_count</th>
+      <th>fill_during_replace_count</th>
+      <th>closed_count</th>
+      <th>hedge_failure_count</th>
+      <th>capital_limit_exit_count</th>
+      <th>net_pnl</th>
+      <th>win_rate</th>
+      <th>worst_net_pnl</th>
+      <th>max_gross_margin</th>
+      <th>order_action_count</th>
+      <th>peak_order_actions_per_minute</th>
+      <th>reprice_count</th>
+      <th>pause_count</th>
+      <th>hedge_failure_rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>overall</td>
+      <td>ALL</td>
+      <td>AP605</td>
+      <td>840</td>
+      <td>3</td>
+      <td>837</td>
+      <td>3</td>
+      <td>839</td>
+      <td>6</td>
+      <td>0</td>
+      <td>52524.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2053.8</td>
+      <td>5110</td>
+      <td>63</td>
+      <td>12</td>
+      <td>21</td>
+      <td>0.007143</td>
+    </tr>
+    <tr>
+      <td>day</td>
+      <td>20260303</td>
+      <td>AP605</td>
+      <td>840</td>
+      <td>3</td>
+      <td>837</td>
+      <td>3</td>
+      <td>839</td>
+      <td>6</td>
+      <td>0</td>
+      <td>52524.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2053.8</td>
+      <td>5110</td>
+      <td>63</td>
+      <td>12</td>
+      <td>21</td>
+      <td>0.007143</td>
+    </tr>
+  </tbody>
+</table></div>
+<h2>本次生效参数</h2><pre>{
+  &quot;tick_data_root&quot;: &quot;data/tick2026&quot;,
+  &quot;daily_data_root&quot;: &quot;data/1d_futures&quot;,
+  &quot;output_dir&quot;: &quot;output/ap605_20260303_t85_v4&quot;,
+  &quot;trade_date_start&quot;: &quot;20260303&quot;,
+  &quot;trade_date_end&quot;: &quot;20260303&quot;,
+  &quot;commodity&quot;: &quot;AP&quot;,
+  &quot;target_contract&quot;: &quot;AP605&quot;,
+  &quot;fair_reference_contracts&quot;: [
+    &quot;AP604&quot;,
+    &quot;AP610&quot;
+  ],
+  &quot;hedge_contract&quot;: &quot;AP604&quot;,
+  &quot;events_csv&quot;: &quot;output/20260301_20260331-range/tick_candidate_events_annotated.csv&quot;,
+  &quot;quality_exclusions&quot;: [],
+  &quot;detector_event_window_ms&quot;: 1000,
+  &quot;account_equity&quot;: 100000.0,
+  &quot;max_margin_ratio&quot;: 0.3,
+  &quot;default_margin_rate&quot;: 0.1,
+  &quot;margin_rate_by_commodity&quot;: {
+    &quot;AP&quot;: 0.1
+  },
+  &quot;default_commission_per_lot_per_side&quot;: 0.0,
+  &quot;commission_by_commodity&quot;: {
+    &quot;AP&quot;: 0.0
+  },
+  &quot;target_lots&quot;: 1,
+  &quot;hedge_lots&quot;: 1,
+  &quot;band_half_width_ticks&quot;: 34.0,
+  &quot;outer_quote_offset_ticks&quot;: 51.0,
+  &quot;reanchor_step_ticks&quot;: 17.0,
+  &quot;reanchor_confirm_ms&quot;: 1000,
+  &quot;resume_confirm_ms&quot;: 1000,
+  &quot;min_reprice_interval_ms&quot;: 1000,
+  &quot;max_order_actions_per_minute&quot;: 150,
+  &quot;cancel_ack_latency_ms&quot;: 1000,
+  &quot;new_order_ack_latency_ms&quot;: 1000,
+  &quot;hedge_submit_latency_ms&quot;: 1000,
+  &quot;max_hedge_wait_ms&quot;: 1000,
+  &quot;hedged_exit_delay_ms&quot;: 2000,
+  &quot;max_quote_age_ms&quot;: 3000,
+  &quot;max_fair_age_ms&quot;: 3000,
+  &quot;max_data_gap_ms&quot;: 3000,
+  &quot;fill_model&quot;: &quot;observable_cross_assumed&quot;,
+  &quot;require_top_of_book_full_lot&quot;: true,
+  &quot;cooldown_ms&quot;: 1000
+}</pre>
+</body></html>

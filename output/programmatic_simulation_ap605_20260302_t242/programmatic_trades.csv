@@ -1,0 +1,1 @@
+﻿trade_id,trade_date,target_contract,hedge_contract,direction,fill_key,fill_time,fill_context,event_label,fill_evidence,target_entry_price,hedge_entry_key,hedge_entry_price,exit_key,exit_time,exit_reason,status,target_exit_price,hedge_exit_price,target_pnl,hedge_pnl,gross_pnl,commission,net_pnl,gross_margin,unhedged_worst_mark_pnl,hedged_worst_mark_pnl,observed_worst_mark_pnl

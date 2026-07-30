@@ -298,6 +298,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
     transitions: list[pd.DataFrame] = []
     orders: list[pd.DataFrame] = []
     trades: list[pd.DataFrame] = []
+    trade_contexts: dict[str, dict[str, Any]] = {}
     skipped: list[dict[str, str]] = []
 
     exclusions = {(item["trade_date"], item["commodity"]) for item in config["quality_exclusions"]}
@@ -348,6 +349,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
         transitions.append(day["transitions"])
         orders.append(day["orders"])
         trades.append(day["trades"])
+        trade_contexts.update(build_trade_contexts(day["trades"], enriched, frames, config))
 
     transition_df = _concat_frames(transitions, STATE_COLUMNS)
     order_df = _concat_frames(orders, ORDER_COLUMNS)
@@ -372,6 +374,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
         "summary": summary,
         "skipped_days": skipped_df,
         "warnings": warnings,
+        "trade_contexts": trade_contexts,
     }
 
 
@@ -1576,32 +1579,235 @@ def write_programmatic_simulation_outputs(result: Mapping[str, Any]) -> dict[str
     return {name: str(path) for name, path in paths.items()}
 
 
+TRADE_CONTEXT_WINDOW_MS = 10_000
+
+TARGET_CONTEXT_COLUMNS = [
+    "display_time", "LastPrice", "Volume", "Turnover", "BidPrice1", "BidVolume1",
+    "AskPrice1", "AskVolume1", "delta_volume", "delta_turnover", "interval_vwap", "fair_price",
+    "last_down_ticks", "fair_price_reliable", "valid_peer_count", "peer_contracts",
+]
+
+REFERENCE_CONTEXT_COLUMNS = [
+    "display_time", "LastPrice", "Volume", "Turnover", "BidPrice1", "BidVolume1",
+    "AskPrice1", "AskVolume1", "AveragePrice", "OpenInterest", "UpperLimitPrice",
+    "LowerLimitPrice", "delta_volume", "delta_turnover", "interval_vwap",
+]
+
+
+def build_trade_contexts(
+    trades: pd.DataFrame,
+    target: pd.DataFrame,
+    frames: Mapping[str, pd.DataFrame],
+    config: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """为每笔模拟成交截取入场前 10 秒到退出后 10 秒的行情复盘窗口。"""
+    contexts: dict[str, dict[str, Any]] = {}
+    if trades.empty:
+        return contexts
+    if "last_down_ticks" not in target.columns:
+        target = target.copy()
+        _attach_context_metrics(target, _frame_tick_size(target, str(config.get("commodity") or "")))
+    for trade in trades.to_dict("records"):
+        fill_key = _context_key_number(trade.get("fill_key"))
+        if fill_key is None:
+            continue
+        exit_key = _context_key_number(trade.get("exit_key"))
+        if exit_key is None:
+            exit_key = _last_frame_key(target)
+        if exit_key is None:
+            continue
+        start_key = fill_key - TRADE_CONTEXT_WINDOW_MS
+        end_key = exit_key + TRADE_CONTEXT_WINDOW_MS
+        phases = {
+            "目标成交": fill_key,
+            "参考腿成交": _context_key_number(trade.get("hedge_entry_key")),
+            "退出": _context_key_number(trade.get("exit_key")),
+        }
+        target_rows = _context_rows(target, start_key, end_key, phases, TARGET_CONTEXT_COLUMNS)
+        contracts: dict[str, dict[str, Any]] = {}
+        reference_contracts = [str(code).upper() for code in config["fair_reference_contracts"]]
+        hedge_contract = str(config["hedge_contract"]).upper()
+        for code in dict.fromkeys([*reference_contracts, hedge_contract]):
+            frame = frames.get(code)
+            if frame is None:
+                continue
+            roles = []
+            if code in reference_contracts:
+                roles.append("合理价参考")
+            if code == hedge_contract:
+                roles.append("对冲合约")
+            contracts[code] = {
+                "roles": roles,
+                "rows": _context_rows(frame, start_key, end_key, phases, REFERENCE_CONTEXT_COLUMNS),
+            }
+        context_key = _trade_context_id(trade)
+        contexts[context_key] = {
+            "window": {
+                "start_key": start_key,
+                "end_key": end_key,
+                "start_time": target_rows[0].get("display_time") if target_rows else None,
+                "end_time": target_rows[-1].get("display_time") if target_rows else None,
+                "before_after_ms": TRADE_CONTEXT_WINDOW_MS,
+            },
+            "phases": {label: key for label, key in phases.items() if key is not None},
+            "phase_times": {
+                "目标成交": trade.get("fill_time"),
+                "参考腿成交": _asof_display_time(frames.get(hedge_contract), phases["参考腿成交"]),
+                "退出": trade.get("exit_time"),
+            },
+            "target_rows": target_rows,
+            "contracts": contracts,
+        }
+    return contexts
+
+
+def _attach_context_metrics(target: pd.DataFrame, tick_size: float | None) -> None:
+    if tick_size is None or "last_down_ticks" in target.columns:
+        return
+    last = pd.to_numeric(target["LastPrice"], errors="coerce")
+    fair = pd.to_numeric(target["fair_price"], errors="coerce")
+    target["last_down_ticks"] = np.where((last > 0) & (fair > 0), ((fair - last) / tick_size).round(2), np.nan)
+
+
+def _trade_context_id(trade: Mapping[str, Any]) -> str:
+    return "::".join(str(trade.get(key) or "") for key in ("instrument", "scenario_id", "trade_id"))
+
+
+def _context_key_number(value: Any) -> int | None:
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return int(number) if pd.notna(number) else None
+
+
+def _last_frame_key(frame: pd.DataFrame) -> int | None:
+    keys = pd.to_numeric(frame.get("market_time_key", pd.Series(dtype=float)), errors="coerce").dropna()
+    return int(keys.iloc[-1]) if not keys.empty else None
+
+
+def _asof_display_time(frame: pd.DataFrame | None, key: int | None) -> str | None:
+    if frame is None or key is None or frame.empty:
+        return None
+    keys = pd.to_numeric(frame.get("market_time_key", pd.Series(dtype=float)), errors="coerce").to_numpy(dtype=float)
+    position = int(np.searchsorted(keys, key, side="right") - 1)
+    if position < 0 or "display_time" not in frame.columns:
+        return None
+    value = frame.iloc[position]["display_time"]
+    return str(value) if pd.notna(value) else None
+
+
+def _context_rows(
+    frame: pd.DataFrame,
+    start_key: int,
+    end_key: int,
+    phases: Mapping[str, int | None],
+    columns: list[str],
+) -> list[dict[str, Any]]:
+    keys = frame["market_time_key"].to_numpy(copy=False)
+    start = int(np.searchsorted(keys, start_key, side="left"))
+    end = int(np.searchsorted(keys, end_key, side="right"))
+    window = frame.iloc[start:end].copy()
+    if window.empty:
+        return []
+    window_keys = pd.to_numeric(window["market_time_key"], errors="coerce").to_numpy(dtype=float)
+    marker_map: dict[int, list[str]] = {}
+    for label, key in phases.items():
+        if key is None:
+            continue
+        position = int(np.searchsorted(window_keys, key, side="right") - 1)
+        if position >= 0:
+            marker_map.setdefault(position, []).append(label)
+    available = [column for column in columns if column in window.columns]
+    rows = json.loads(window[available].to_json(orient="records", force_ascii=False))
+    for index, row in enumerate(rows):
+        row["关键时点"] = "、".join(marker_map.get(index, []))
+    return rows
+
+
 def _render_programmatic_report(result: Mapping[str, Any]) -> str:
-    summary = result["summary"]
-    warnings = "".join(f"<li>{escape(str(item))}</li>" for item in result["warnings"])
-    config_json = escape(
-        json.dumps({key: value for key, value in result["config"].items() if not key.startswith("_")}, ensure_ascii=False, indent=2)
+    summary_table = result["summary"].to_html(index=False, border=0, classes="summary", justify="left", escape=True)
+    warnings_html = "".join(f"<li>{escape(str(item))}</li>" for item in result["warnings"])
+    config_view = {key: value for key, value in result["config"].items() if not key.startswith("_")}
+    config_json = escape(json.dumps(config_view, ensure_ascii=False, indent=2))
+    trades = result.get("trades")
+    payload = {
+        "trades": json.loads(trades.to_json(orient="records", force_ascii=False)) if trades is not None and not trades.empty else [],
+        "trade_contexts": result.get("trade_contexts", {}),
+    }
+    payload_json = json.dumps(payload, ensure_ascii=False, default=str).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return (
+        _SIMULATION_REPORT_TEMPLATE.replace("__SUMMARY__", summary_table)
+        .replace("__WARNINGS__", warnings_html)
+        .replace("__CONFIG__", config_json)
+        .replace("__PAYLOAD__", payload_json)
     )
-    table = summary.to_html(index=False, border=0, classes="summary", justify="left", escape=True)
-    return f"""<!doctype html>
-<html lang=\"zh-CN\">
+
+
+_SIMULATION_REPORT_TEMPLATE = r"""<!doctype html>
+<html lang="zh-CN">
 <head>
-<meta charset=\"utf-8\">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>乌龙指程序化状态机回放</title>
 <style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, \"PingFang SC\", sans-serif; margin: 28px; color: #202124; }}
-.muted {{ color: #5f6368; }} .warning {{ background: #fff7e6; border-left: 4px solid #e37400; padding: 12px 16px; margin: 20px 0; }}
-pre {{ background: #f6f8fa; padding: 14px; overflow: auto; }} table {{ border-collapse: collapse; font-size: 12px; }}
-th, td {{ border: 1px solid #dfe3e8; padding: 6px 8px; white-space: nowrap; }} th {{ background: #f6f8fa; }} .scroll {{ overflow-x: auto; }}
+body{max-width:1500px;margin:0 auto;padding:26px;color:#172033;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif}
+h1{margin:0 0 6px}h2{margin:30px 0 12px;font-size:19px}.muted{color:#667085}
+.note,.warning{padding:12px 14px;background:#fff6df;border-left:4px solid #e28b00;border-radius:7px;margin:18px 0}
+pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:#f7f9fc;padding:12px;border-radius:7px;max-height:340px;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:9px 10px;border-bottom:1px solid #edf0f4;text-align:left;white-space:nowrap}
+thead th{background:#f7f9fc}.scroll,.table-wrap{max-height:560px;overflow:auto;background:#fff;border:1px solid #e4e8ef;border-radius:10px}
+.summary th{background:#f6f8fa}.target-table{overflow-x:hidden}.target-table table{table-layout:fixed}.target-table th,.target-table td{white-space:normal;word-break:break-word;padding:7px 5px;font-size:11px}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}button,select{font:inherit;padding:7px 10px;border:1px solid #cbd5e1;border-radius:7px;background:#fff}button{cursor:pointer}
+.tag{border-radius:999px;padding:3px 8px;font-size:12px;background:#eef2f6}.good{background:#e7f6ec;color:#146c35}.bad{background:#ffebe9;color:#b42318}.warn{background:#fff4d6;color:#8a5700}
+.negative{color:#b42318;font-weight:650}.positive{color:#146c35;font-weight:650}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:18px 0}.card{background:#fff;border:1px solid #e4e8ef;border-radius:10px;box-shadow:0 1px 3px #dfe5ee;padding:13px}.card span{display:block;color:#667085;font-size:12px}.card strong{display:block;font-size:16px;margin-top:4px;word-break:break-all}
+.modal{position:fixed;inset:0;z-index:20;padding:26px;overflow:auto;background:rgba(15,23,42,.48)}.modal-panel{max-width:1440px;margin:auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 20px 80px rgba(15,23,42,.3)}.modal-topbar{display:flex;justify-content:space-between;gap:12px;align-items:center}.modal-close{background:#172033;color:#fff;border-color:#172033}
+.marker{background:#fee2e2;font-weight:700}.contract-title{margin:24px 0 8px;font-size:16px}.detail-button{color:#fff;background:#1769aa;border-color:#1769aa}.hidden{display:none}
 </style>
 </head>
 <body>
 <h1>乌龙指程序化状态机回放</h1>
-<p class=\"muted\">全天快照分母；候选事件只作事后标签。详细状态、订单和交易见同目录 CSV。</p>
-<div class=\"warning\"><strong>结果边界</strong><ul>{warnings}</ul></div>
-<h2>汇总</h2><div class=\"scroll\">{table}</div>
-<h2>本次生效参数</h2><pre>{config_json}</pre>
-</body></html>"""
+<p class="muted">全天 500ms 快照状态机回放；候选事件仅作事后标签。点“查看详情”复盘单笔成交。</p>
+<div class="warning"><strong>结果边界</strong><ul>__WARNINGS__</ul></div>
+<h2>汇总</h2><div class="scroll">__SUMMARY__</div>
+<h2>单笔模拟成交</h2>
+<div class="toolbar">
+<label>成交分类 <select id="event-filter"><option value="">全部</option><option value="detector_event_fill">候选事件成交</option><option value="normal_move_fill">正常行情成交</option></select></label>
+<label>方向 <select id="direction-filter"><option value="">全部</option><option value="long">买入目标</option><option value="short">卖出目标</option></select></label>
+<label>成交证据 <select id="evidence-filter"><option value="">全部</option></select></label>
+<label>退出原因 <select id="exit-filter"><option value="">全部</option></select></label>
+<span id="trade-count" class="muted"></span>
+</div>
+<div class="table-wrap"><table><thead><tr><th>交易日</th><th>成交时间</th><th>方向</th><th>成交分类</th><th>成交证据</th><th>目标入场</th><th>参考腿入场</th><th>退出原因</th><th>目标盈亏</th><th>净收益</th><th>未对冲最差</th><th>复盘</th></tr></thead><tbody id="trade-body"></tbody></table></div>
+<details><summary>本次生效参数</summary><pre>__CONFIG__</pre></details>
+<section id="trade-modal" class="modal hidden" role="dialog" aria-modal="true">
+<div class="modal-panel"><div class="modal-topbar"><strong id="modal-title">单笔模拟成交复盘</strong><button id="modal-close" class="modal-close">关闭</button></div>
+<p class="note">复盘窗口为目标成交前 10 秒至退出后 10 秒；参考合约关键时点均使用当时或之前最近快照。</p>
+<div id="modal-cards" class="cards"></div><div id="modal-content"></div>
+<details><summary>该笔交易原始字段</summary><pre id="modal-raw"></pre></details></div>
+</section>
+<script id="sim-payload" type="application/json">__PAYLOAD__</script>
+<script>
+const data=JSON.parse(document.getElementById('sim-payload').textContent);
+const eventLabels={detector_event_fill:'候选事件成交',normal_move_fill:'正常行情成交'};
+const statusLabels={closed:'已正常退出',hedge_failure_exit:'对冲失败退出',capital_limit_exit:'保证金限制退出',unclosed_end_of_day:'收盘未平'};
+const exitLabels={hedged_exit:'对冲后平仓',emergency_flatten:'紧急平仓',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
+const evidenceLabels={last_trade:'LastPrice',interval_vwap:'区间均价',top_of_book:'买卖一'};
+const trades=data.trades||[],tradeContexts=data.trade_contexts||{};
+const targetColumns=[['关键时点','关键时点'],['display_time','更新时间'],['LastPrice','最新成交价'],['Volume','累计成交量'],['Turnover','累计成交额'],['BidPrice1','买一价'],['BidVolume1','买一量'],['AskPrice1','卖一价'],['AskVolume1','卖一量'],['delta_volume','区间增量成交量'],['delta_turnover','区间增量成交额'],['interval_vwap','区间成交均价'],['fair_price','合理价'],['last_down_ticks','末笔向下偏离_跳'],['fair_price_reliable','合理价可靠'],['valid_peer_count','有效参考数'],['peer_contracts','有效参考合约']];
+const referenceColumns=[['关键时点','关键时点'],['display_time','更新时间'],['LastPrice','最新成交价'],['Volume','累计成交量'],['Turnover','累计成交额'],['BidPrice1','买一价'],['BidVolume1','买一量'],['AskPrice1','卖一价'],['AskVolume1','卖一量'],['AveragePrice','原始平均价'],['OpenInterest','持仓量'],['UpperLimitPrice','涨停价'],['LowerLimitPrice','跌停价'],['delta_volume','区间增量成交量'],['delta_turnover','区间增量成交额'],['interval_vwap','区间成交均价']];
+const number=v=>v===null||v===undefined||Number.isNaN(Number(v))?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2});
+const display=v=>v===null||v===undefined||v===''?'—':typeof v==='number'?number(v):String(v);
+const money=v=>v===null||v===undefined?'—':(Number(v)>=0?'+':'')+number(v);
+const labelEvidence=v=>(v||'—').split('+').map(x=>evidenceLabels[x]||x).join(' + ');
+function tradeContextKey(x){return (x.instrument||'')+'::'+(x.scenario_id||'')+'::'+x.trade_id}
+function contextTable(rows,columns,target=false){const head=columns.map(([,label])=>'<th>'+label+'</th>').join('');const body=rows.map(row=>'<tr class="'+(row['关键时点']?'marker':'')+'">'+columns.map(([key])=>'<td>'+display(row[key])+'</td>').join('')+'</tr>').join('')||'<tr><td colspan="'+columns.length+'">该窗口无可用快照。</td></tr>';return '<div class="table-wrap'+(target?' target-table':'')+'"><table><thead><tr>'+head+'</tr></thead><tbody>'+body+'</tbody></table></div>'}
+function openTradeDetail(trade){const context=tradeContexts[tradeContextKey(trade)];if(!context){alert('该笔交易未生成复盘上下文。');return}document.getElementById('modal-title').textContent=trade.trade_id;const phaseTimes=context.phase_times||{};const hold=trade.exit_key===null||trade.exit_key===undefined?'—':((Number(trade.exit_key)-Number(trade.fill_key))/1000).toFixed(1)+' 秒';const cards=[['交易日',display(trade.trade_date)],['目标/对冲合约',trade.target_contract+' / '+(trade.hedge_contract||'—')],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['对冲成交价',(trade.hedge_contract||'—')+'：'+number(trade.hedge_entry_price)],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',money(trade.target_pnl)+' / '+money(trade.hedge_pnl)],['净收益',money(trade.net_pnl)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];document.getElementById('modal-cards').innerHTML=cards.map(([k,v])=>'<div class="card"><span>'+k+'</span><strong>'+v+'</strong></div>').join('');let content='<h2>目标合约 '+trade.target_contract+'</h2><p class="muted">完整持仓窗口：'+display(context.window.start_time)+' 至 '+display(context.window.end_time)+'（目标成交前 '+number(context.window.before_after_ms/1000)+' 秒至退出后 '+number(context.window.before_after_ms/1000)+' 秒）</p>'+contextTable(context.target_rows,targetColumns,true);Object.entries(context.contracts||{}).forEach(([code,part])=>{content+='<h3 class="contract-title">'+code+' <span class="muted">'+(part.roles||[]).join(' / ')+'</span></h3>'+contextTable(part.rows||[],referenceColumns)});document.getElementById('modal-content').innerHTML=content;document.getElementById('modal-raw').textContent=JSON.stringify(trade,null,2);document.getElementById('trade-modal').classList.remove('hidden')}
+function fillOptions(id,values,labels={}){const el=document.getElementById(id),old=el.value;el.innerHTML='<option value="">全部</option>'+[...new Set(values.filter(Boolean))].sort().map(x=>'<option value="'+x+'">'+(labels[x]||labelEvidence(x))+'</option>').join('');el.value=old;}
+function renderTrades(){const event=document.getElementById('event-filter').value,direction=document.getElementById('direction-filter').value,evidence=document.getElementById('evidence-filter').value,exit=document.getElementById('exit-filter').value;const rows=trades.filter(x=>(!event||x.event_label===event)&&(!direction||x.direction===direction)&&(!evidence||x.fill_evidence===evidence)&&(!exit||x.exit_reason===exit));document.getElementById('trade-count').textContent=rows.length+' 笔';document.getElementById('trade-body').innerHTML=rows.sort((a,b)=>Number(a.fill_key)-Number(b.fill_key)).map(x=>'<tr><td>'+display(x.trade_date)+'</td><td>'+x.fill_time+'</td><td>'+(x.direction==='long'?'买入目标':'卖出目标')+'</td><td><span class="tag '+(x.event_label==='normal_move_fill'?'warn':'good')+'">'+(eventLabels[x.event_label]||x.event_label)+'</span></td><td>'+labelEvidence(x.fill_evidence)+'</td><td>'+number(x.target_entry_price)+'</td><td>'+number(x.hedge_entry_price)+'</td><td>'+(exitLabels[x.exit_reason]||x.exit_reason||'—')+'</td><td>'+money(x.target_pnl)+'</td><td class="'+(Number(x.net_pnl)<0?'negative':'positive')+'">'+money(x.net_pnl)+'</td><td>'+money(x.unhedged_worst_mark_pnl)+'</td><td><button class="detail-button" data-context="'+tradeContextKey(x)+'">查看详情</button></td></tr>').join('')||'<tr><td colspan="12">当前筛选下无成交。</td></tr>';document.querySelectorAll('[data-context]').forEach(button=>button.onclick=()=>openTradeDetail(trades.find(x=>tradeContextKey(x)===button.dataset.context)));}
+function init(){fillOptions('evidence-filter',trades.map(x=>x.fill_evidence));fillOptions('exit-filter',trades.map(x=>x.exit_reason),exitLabels);['event-filter','direction-filter','evidence-filter','exit-filter'].forEach(id=>document.getElementById(id).onchange=renderTrades);document.getElementById('modal-close').onclick=()=>document.getElementById('trade-modal').classList.add('hidden');document.getElementById('trade-modal').onclick=e=>{if(e.target.id==='trade-modal')e.currentTarget.classList.add('hidden')};document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById('trade-modal').classList.add('hidden')});renderTrades();}
+init();
+</script>
+</body>
+</html>"""
 
 
 def _concat_frames(frames: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:

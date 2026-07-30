@@ -22,8 +22,10 @@ from src.programmatic_simulation import (
     _load_required_frames,
     _resolve_tick_day_path,
     _simulate_programmatic_day_prepared,
+    _attach_context_metrics,
     attach_fair_price_metrics,
     build_programmatic_summary,
+    build_trade_contexts,
     normalize_programmatic_simulation_config,
 )
 
@@ -91,21 +93,6 @@ GRID_SUMMARY_COLUMNS = [
     "eligible",
     "selection_reason",
 ]
-
-TRADE_CONTEXT_WINDOW_MS = 10_000
-
-TARGET_CONTEXT_COLUMNS = [
-    "display_time", "LastPrice", "Volume", "Turnover", "BidPrice1", "BidVolume1",
-    "AskPrice1", "AskVolume1", "delta_volume", "delta_turnover", "interval_vwap", "fair_price",
-    "last_down_ticks", "fair_price_reliable", "valid_peer_count", "peer_contracts",
-]
-
-REFERENCE_CONTEXT_COLUMNS = [
-    "display_time", "LastPrice", "Volume", "Turnover", "BidPrice1", "BidVolume1",
-    "AskPrice1", "AskVolume1", "AveragePrice", "OpenInterest", "UpperLimitPrice",
-    "LowerLimitPrice", "delta_volume", "delta_turnover", "interval_vwap",
-]
-
 
 def load_programmatic_grid_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
@@ -302,7 +289,7 @@ def run_programmatic_grid(
                     if should_build_context:
                         started = perf_counter() if timings is not None else None
                         trade_contexts.update(
-                            build_grid_trade_contexts(
+                            build_trade_contexts(
                                 trades,
                                 enriched,
                                 frames,
@@ -471,134 +458,6 @@ def _write_fair_cache(config: Mapping[str, Any], cache_key: str, enriched: pd.Da
     except Exception:
         temporary.unlink(missing_ok=True)
         temporary_manifest.unlink(missing_ok=True)
-
-
-def build_grid_trade_contexts(
-    trades: pd.DataFrame,
-    target: pd.DataFrame,
-    frames: Mapping[str, pd.DataFrame],
-    config: Mapping[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """为每笔模拟成交截取入场前 10 秒到退出后 10 秒的行情复盘窗口。"""
-    contexts: dict[str, dict[str, Any]] = {}
-    if trades.empty:
-        return contexts
-    if "last_down_ticks" not in target.columns:
-        target = target.copy()
-        _attach_context_metrics(target, _frame_tick_size(target, str(config.get("commodity") or "")))
-    for trade in trades.to_dict("records"):
-        fill_key = _context_key_number(trade.get("fill_key"))
-        if fill_key is None:
-            continue
-        exit_key = _context_key_number(trade.get("exit_key"))
-        if exit_key is None:
-            exit_key = _last_frame_key(target)
-        if exit_key is None:
-            continue
-        start_key = fill_key - TRADE_CONTEXT_WINDOW_MS
-        end_key = exit_key + TRADE_CONTEXT_WINDOW_MS
-        phases = {
-            "目标成交": fill_key,
-            "参考腿成交": _context_key_number(trade.get("hedge_entry_key")),
-            "退出": _context_key_number(trade.get("exit_key")),
-        }
-        target_rows = _context_rows(target, start_key, end_key, phases, TARGET_CONTEXT_COLUMNS)
-        contracts: dict[str, dict[str, Any]] = {}
-        reference_contracts = [str(code).upper() for code in config["fair_reference_contracts"]]
-        hedge_contract = str(config["hedge_contract"]).upper()
-        for code in dict.fromkeys([*reference_contracts, hedge_contract]):
-            frame = frames.get(code)
-            if frame is None:
-                continue
-            roles = []
-            if code in reference_contracts:
-                roles.append("合理价参考")
-            if code == hedge_contract:
-                roles.append("对冲合约")
-            contracts[code] = {
-                "roles": roles,
-                "rows": _context_rows(frame, start_key, end_key, phases, REFERENCE_CONTEXT_COLUMNS),
-            }
-        context_key = _trade_context_id(trade)
-        contexts[context_key] = {
-            "window": {
-                "start_key": start_key,
-                "end_key": end_key,
-                "start_time": target_rows[0].get("display_time") if target_rows else None,
-                "end_time": target_rows[-1].get("display_time") if target_rows else None,
-                "before_after_ms": TRADE_CONTEXT_WINDOW_MS,
-            },
-            "phases": {label: key for label, key in phases.items() if key is not None},
-            "phase_times": {
-                "目标成交": trade.get("fill_time"),
-                "参考腿成交": _asof_display_time(frames.get(hedge_contract), phases["参考腿成交"]),
-                "退出": trade.get("exit_time"),
-            },
-            "target_rows": target_rows,
-            "contracts": contracts,
-        }
-    return contexts
-
-
-def _attach_context_metrics(target: pd.DataFrame, tick_size: float | None) -> None:
-    if tick_size is None or "last_down_ticks" in target.columns:
-        return
-    last = pd.to_numeric(target["LastPrice"], errors="coerce")
-    fair = pd.to_numeric(target["fair_price"], errors="coerce")
-    target["last_down_ticks"] = np.where((last > 0) & (fair > 0), ((fair - last) / tick_size).round(2), np.nan)
-
-
-def _trade_context_id(trade: Mapping[str, Any]) -> str:
-    return "::".join(str(trade.get(key) or "") for key in ("instrument", "scenario_id", "trade_id"))
-
-
-def _context_key_number(value: Any) -> int | None:
-    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    return int(number) if pd.notna(number) else None
-
-
-def _last_frame_key(frame: pd.DataFrame) -> int | None:
-    keys = pd.to_numeric(frame.get("market_time_key", pd.Series(dtype=float)), errors="coerce").dropna()
-    return int(keys.iloc[-1]) if not keys.empty else None
-
-
-def _asof_display_time(frame: pd.DataFrame | None, key: int | None) -> str | None:
-    if frame is None or key is None or frame.empty:
-        return None
-    keys = pd.to_numeric(frame.get("market_time_key", pd.Series(dtype=float)), errors="coerce").to_numpy(dtype=float)
-    position = int(np.searchsorted(keys, key, side="right") - 1)
-    if position < 0 or "display_time" not in frame.columns:
-        return None
-    value = frame.iloc[position]["display_time"]
-    return str(value) if pd.notna(value) else None
-
-
-def _context_rows(
-    frame: pd.DataFrame,
-    start_key: int,
-    end_key: int,
-    phases: Mapping[str, int | None],
-    columns: list[str],
-) -> list[dict[str, Any]]:
-    keys = frame["market_time_key"].to_numpy(copy=False)
-    start = int(np.searchsorted(keys, start_key, side="left"))
-    end = int(np.searchsorted(keys, end_key, side="right"))
-    window = frame.iloc[start:end].copy()
-    if window.empty:
-        return []
-    window_keys = pd.to_numeric(window["market_time_key"], errors="coerce").to_numpy(dtype=float)
-    marker_map: dict[int, list[str]] = {}
-    for label, key in phases.items():
-        if key is None:
-            continue
-        position = int(np.searchsorted(window_keys, key, side="right") - 1)
-        if position >= 0:
-            marker_map.setdefault(position, []).append(label)
-    available = [column for column in columns if column in window.columns]
-    rows = json.loads(window[available].to_json(orient="records", force_ascii=False))
-    for index, row in enumerate(rows):
-        row["关键时点"] = "、".join(marker_map.get(index, []))
-    return rows
 
 
 def _empty_daily(scenario: Mapping[str, Any], instrument: str, trade_date: str, reason: str) -> dict[str, Any]:

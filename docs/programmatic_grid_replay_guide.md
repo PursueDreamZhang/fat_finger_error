@@ -4,7 +4,7 @@
 
 程序化网格回放器用于评估“提前挂双向被动单，目标腿成交后立即对冲”的乌龙指交易设想。它不是实盘下单程序，也不是交易所成交回报还原器。
 
-回放以约 500ms 的快照为输入：用无未来的 `fair_price` 决定是否重定锚，用目标合约的 `LastPrice`、区间成交均价与买卖一判断模拟成交；目标腿成交后按对冲合约当时或之前最近一笔买卖一加滑点模拟对冲和退出。
+回放以约 500ms 的快照为输入：用无未来的 `fair_price` 决定是否重定锚，用目标合约的 `LastPrice`、区间成交均价与买卖一判断模拟成交；目标腿成交后按对冲合约当时或之前最近一笔买卖一档价模拟对冲和退出（对冲、退出与盯市均不加滑点）。
 
 候选事件 CSV **只用于成交后的归因标签**（候选事件成交或正常行情成交），不参与下单、撤单、重定锚或成交判定。因此“模拟成交数”不等于“乌龙指机会数”。
 
@@ -86,15 +86,15 @@
 
 ### 4.2 对冲与退出
 
-目标腿成交后，回放等待 `hedge_submit_latency_ms`，以对冲合约 as-of 快照的可执行一档价格加 `slippage_ticks` 模拟对冲。若超出 `max_hedge_wait_ms` 仍无可用报价，则按对冲失败退出。
+目标腿成交后，回放等待 `hedge_submit_latency_ms`，以对冲合约 as-of 快照的可执行一档价格模拟对冲（不加滑点）。若超出 `max_hedge_wait_ms` 仍无可用报价，则按对冲失败直接平目标腿。
 
-退出包括合理价回归、止损、止盈、最长持有期、参考失效、数据断点和收盘强平。报告会同时给出目标盈亏、对冲盈亏、净收益、未对冲最差浮亏和对冲后最差浮亏。
+退出由对冲驱动，不再依赖 fair：对冲成交后延迟 `hedged_exit_delay_ms` 平两腿（`hedged_exit`）；对冲超时未成则直接平目标腿（`hedge_failure_exit`）；另有数据断点紧急平仓和收盘强平。fair 失效时以目标合约 LastPrice 兜底继续报价、不撤单。报告会同时给出目标盈亏、对冲盈亏、净收益、未对冲最差浮亏和对冲后最差浮亏。
 
 ### 4.3 必须注意的边界
 
 - 不模拟盘口排队位置、真实委托回报、撮合优先级或交易所限频；
 - 成交与对冲不能保证在同一快照内真实完成；
-- 数据断点、无有效盘口、参考失效会进入暂停或紧急退出路径；
+- 数据断点、无有效盘口进入暂停；fair 失效时改用目标合约 LastPrice 兜底继续报价（不撤单），仅当 fair 与 LastPrice 均不可用时才暂停；
 - 结果只能用于筛选可研究的参数组合，实盘前还需结合真实手续费、保证金、交易权限和风控限制复核。
 
 ## 5. 输出与 HTML 报告
@@ -129,7 +129,7 @@ scripts/run_programmatic_grid.py
        ├─ build_grid_scenarios()                     W/D/S × 延迟笛卡尔组合
        ├─ run_programmatic_grid()                    品种/日期/场景主循环
        ├─ _prepare_grid_day()                        加载帧、fair、缓存、事件键
-       ├─ build_grid_trade_contexts()                单笔前后窗口与 as-of 参考快照
+       ├─ build_trade_contexts()（已移至 simulation.py，grid import）                单笔前后窗口与 as-of 参考快照
        ├─ _render_grid_report()                      离线 HTML 报告
        └─ write_programmatic_grid_outputs()          CSV/JSON/HTML 写出
 
@@ -137,7 +137,10 @@ src/programmatic_simulation.py
   ├─ normalize_programmatic_simulation_config()      单场景参数规范化
   ├─ _DayReplay                                  全天状态机、订单、仓位与风控
   ├─ _simulate_programmatic_day_prepared()       网格内部复用已排序帧入口
-  └─ simulate_programmatic_day()                 对外单日回放入口
+  ├─ simulate_programmatic_day()                 对外单日回放入口
+  ├─ build_trade_contexts()                      单笔前后窗口与 as-of 参考快照（grid/simulation 共用）
+  ├─ _render_programmatic_report()               单配置离线 HTML 报告（含成交复盘）
+  └─ write_programmatic_simulation_outputs()     单配置 CSV/HTML 写出
 
 src/tick_detector/reference_selection.py
   └─ attach_fair_price_metrics()                  无未来合理价与可靠性指标
@@ -190,3 +193,40 @@ wait
 - 首次并行建缓存时，建议每个品种使用不同 `fair_cache_dir`，避免同时写同一个缓存文件；
 - 可通过 `tail -f /private/tmp/grid_NI_202603.log` 查看某个品种的实时日志；
 - 完成后分别打开每个输出目录中的 `programmatic_grid_report.html`。
+
+## 10. 单配置回放（run_programmatic_simulation）
+
+网格回放用于扫多组 W/D/S × 延迟参数；若只想验证**一组已知参数**，用单配置入口更快，且报告同样含成交复盘。两者共用 `_DayReplay`，成交/对冲/退出/复盘口径完全一致。
+
+```bash
+./venv/bin/python scripts/run_programmatic_simulation.py \
+  --config config/programmatic_simulation.example.json \
+  --start-date 20260303 --end-date 20260303 \
+  --output-dir output/programmatic_simulation_ap605_20260303
+```
+
+`--start-date` / `--end-date` / `--output-dir` 可覆盖配置里的同名项。配置范例见 `config/programmatic_simulation.example.json`，主要字段：
+
+|字段|含义|
+|---|---|
+|`commodity` / `target_contract`|品种与目标合约|
+|`fair_reference_contracts`|构建无未来 fair 的参考合约（≥2 个）|
+|`hedge_contract`|对冲腿，必须属于上面的参考集|
+|`band_half_width_ticks` / `outer_quote_offset_ticks` / `reanchor_step_ticks`|即 W / D / S|
+|`hedged_exit_delay_ms`|对冲成交后延迟多久平两腿|
+|`max_order_actions_per_minute`|每分钟报撤动作上限|
+|`events_csv`|候选事件 CSV，仅用于成交后归因标签，可为空|
+
+输出（写入 `output_dir`）：
+
+|文件|内容|
+|---|---|
+|`programmatic_summary.csv`|汇总（overall + 逐日）|
+|`programmatic_trades.csv`|每笔模拟交易明细|
+|`quote_state_transitions.csv`|状态机转换链|
+|`order_lifecycle.csv`|订单挂/撤/成交生命周期|
+|`programmatic_report.html`|离线报告，含成交复盘（点“查看详情”看目标+参考+对冲快照，复盘数据内嵌本文件，不单独出 JSON）|
+|`programmatic_skipped_days.csv`|跳过的交易日|
+|`run_config.json`|本次生效配置|
+
+与网格回放的区别仅在：单配置不扫参数网格、不写 `programmatic_grid_trade_contexts.json`（复盘直接内嵌 report），输出文件名为 `programmatic_*`（网格为 `programmatic_grid_*`）。
