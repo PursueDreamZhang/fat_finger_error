@@ -63,11 +63,11 @@ def test_range_binding_metadata_must_be_consistent_and_sha256_shaped():
         build_parameter_shapes(events)
 
 
-def test_each_contract_gets_p50_p70_p85_and_w_s_combinations():
+def test_each_contract_gets_p70_p85_and_w_s_combinations():
     shapes = build_parameter_shapes(_events())
     assert list(shapes.columns) == ["commodity", "target_contract", "T_ticks", "W_ticks", "D_ticks", "S_ticks"]
-    assert len(shapes) == 12
-    assert set(shapes["T_ticks"]) == {6, 7, 8}
+    assert len(shapes) == 8
+    assert set(shapes["T_ticks"]) == {7, 8}
     assert (shapes["T_ticks"] == shapes["W_ticks"] + shapes["D_ticks"]).all()
 
 
@@ -112,6 +112,13 @@ def test_json_config_can_limit_combination_dimensions(tmp_path):
     shapes = build_parameter_shapes(_events(), load_parameter_generator_config(path))
     assert shapes.iloc[0]["T_ticks"] == 6
     assert len(shapes) == 1
+
+
+def test_explicit_three_quantiles_restores_p50():
+    shapes = build_parameter_shapes(_events(), ParameterGeneratorConfig(total_touch_quantiles=(0.5, 0.7, 0.85)))
+
+    assert set(shapes["T_ticks"]) == {6, 7, 8}
+    assert len(shapes) == 12
 
 
 def test_default_threshold_is_four_eligible_events():

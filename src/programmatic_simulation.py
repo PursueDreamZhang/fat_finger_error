@@ -53,9 +53,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "commission_by_commodity": {},
     "target_lots": 1,
     "hedge_lots": 1,
+    "enable_hedge": True,
     "band_half_width_ticks": 10,
     "outer_quote_offset_ticks": 10,
     "reanchor_step_ticks": 10,
+    "quote_spread_multiple": 2.0,
     "reanchor_confirm_ms": 1000,
     "resume_confirm_ms": 2000,
     "min_reprice_interval_ms": 1000,
@@ -206,9 +208,11 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     config["commission_by_commodity"] = _number_map(config.get("commission_by_commodity"), "commission_by_commodity", allow_zero=True)
     config["target_lots"] = _positive_int(config.get("target_lots"), "target_lots")
     config["hedge_lots"] = _positive_int(config.get("hedge_lots"), "hedge_lots")
+    config["enable_hedge"] = _as_bool(config.get("enable_hedge"), "enable_hedge")
 
     for key in ("band_half_width_ticks", "outer_quote_offset_ticks", "reanchor_step_ticks"):
         config[key] = _positive_number(config.get(key), key)
+    config["quote_spread_multiple"] = _positive_number(config.get("quote_spread_multiple"), "quote_spread_multiple")
     for key in (
         "reanchor_confirm_ms",
         "resume_confirm_ms",
@@ -316,7 +320,12 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
             skipped.append({"trade_date": trade_date, "reason": f"day_load_failed: {exc}"})
             continue
 
-        required = {config["target_contract"], config["hedge_contract"], *config["fair_reference_contracts"]}
+        fair_reference_contracts = set(config["fair_reference_contracts"])
+        if not config["enable_hedge"]:
+            fair_reference_contracts.discard(config["hedge_contract"])
+        required = {config["target_contract"], *fair_reference_contracts}
+        if config["enable_hedge"]:
+            required.add(config["hedge_contract"])
         missing = sorted(contract for contract in required if contract not in frames)
         if missing:
             skipped.append({"trade_date": trade_date, "reason": f"contract_missing: {','.join(missing)}"})
@@ -330,6 +339,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
         fair_references = {
             contract: frames[contract]
             for contract in config["fair_reference_contracts"]
+            if contract in frames
         }
         enriched = attach_fair_price_metrics(
             target,
@@ -341,7 +351,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
         event_keys = _event_keys_for_day(event_rows, trade_date, config["target_contract"], enriched)
         day = simulate_programmatic_day(
             enriched,
-            frames[config["hedge_contract"]],
+            frames.get(config["hedge_contract"], pd.DataFrame()),
             config,
             trade_date=trade_date,
             detector_event_keys=event_keys,
@@ -349,7 +359,16 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
         transitions.append(day["transitions"])
         orders.append(day["orders"])
         trades.append(day["trades"])
-        trade_contexts.update(build_trade_contexts(day["trades"], enriched, frames, config))
+        trade_contexts.update(
+            build_trade_contexts(
+                day["trades"],
+                enriched,
+                frames,
+                config,
+                orders=day["orders"],
+                transitions=day["transitions"],
+            )
+        )
 
     transition_df = _concat_frames(transitions, STATE_COLUMNS)
     order_df = _concat_frames(orders, ORDER_COLUMNS)
@@ -359,7 +378,7 @@ def run_programmatic_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
     warnings = [
         "这是基于约 500ms 快照的全天状态机回放；observable_cross_assumed 不是交易所成交回报。",
         "fair_reference_contracts 由配置显式冻结，未按当天最终成交量选参考合约。",
-        "fair 失效时以目标合约最新成交价兜底驱动挂单/重定锚；乌龙指尖刺期间锚点可能追随尖刺，挂单或被带至尖刺尾部。",
+        "目标腿挂单锚点和重定锚均由目标合约 LastPrice 驱动；fair_price 仅保留为诊断和详情对比字段。",
         "所有成交腿（对冲参考腿、退出腿）与盯市浮亏均按可见买卖一档价估算（不加滑点），未还原盘口队列位置。",
     ]
     if config["events_csv"]:
@@ -393,21 +412,39 @@ class _DayReplay:
     ) -> None:
         if target_frame.empty:
             raise ValueError("目标合约快照为空")
-        if hedge_frame.empty:
+        if hedge_frame.empty and bool(config.get("enable_hedge", True)):
             raise ValueError("对冲合约快照为空")
         self.target = target_frame if assume_sorted else target_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
-        self.hedge = hedge_frame if assume_sorted else hedge_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
-        self.hedge_keys = pd.to_numeric(self.hedge["market_time_key"], errors="coerce").to_numpy(dtype=np.int64)
+        self.hedge = (
+            hedge_frame
+            if assume_sorted or hedge_frame.empty
+            else hedge_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
+        )
+        self.hedge_keys = (
+            pd.to_numeric(self.hedge["market_time_key"], errors="coerce").to_numpy(dtype=np.int64)
+            if not self.hedge.empty
+            else np.array([], dtype=np.int64)
+        )
         self.config = config
         self.trade_date = trade_date
         self.detector_event_keys = detector_event_keys
         self.commodity = str(self.target["commodity"].iloc[0]).upper()
         self.target_contract = str(self.target["contract"].iloc[0]).upper()
-        self.hedge_contract = str(self.hedge["contract"].iloc[0]).upper()
+        self.hedge_contract = str(
+            self.hedge["contract"].iloc[0] if not self.hedge.empty else config["hedge_contract"]
+        ).upper()
         self.target_tick = _required_frame_tick_size(self.target, self.commodity)
-        self.hedge_tick = _required_frame_tick_size(self.hedge, self.commodity)
+        self.hedge_tick = (
+            _required_frame_tick_size(self.hedge, self.commodity)
+            if not self.hedge.empty
+            else self.target_tick
+        )
         self.target_multiplier = _required_frame_multiplier(self.target, self.commodity)
-        self.hedge_multiplier = _required_frame_multiplier(self.hedge, self.commodity)
+        self.hedge_multiplier = (
+            _required_frame_multiplier(self.hedge, self.commodity)
+            if not self.hedge.empty
+            else self.target_multiplier
+        )
 
         self.state = "PAUSED"
         self.anchor: float | None = None
@@ -429,7 +466,7 @@ class _DayReplay:
         self.cooldown_until_key = 0
         self.reanchor_direction = ""
         self.reanchor_started_key: int | None = None
-        self.fair_recovered_since_key: int | None = None
+        self.last_price_recovered_since_key: int | None = None
         self.last_row: Mapping[str, Any] | None = None
 
     def run(self) -> dict[str, pd.DataFrame]:
@@ -449,6 +486,12 @@ class _DayReplay:
                 # 断点期间旧单是否曾被打到不可观察；不能在恢复后的第一帧补造一笔成交。
                 if data_gap:
                     self._pause(row, "data_gap")
+                elif _valid_last_price(row) is None:
+                    if self.state not in {"PAUSED", "COOLDOWN"} or self._has_live_target_orders():
+                        self._pause(row, "last_price_invalid_or_session_guard")
+                elif not _quote_spread_ok(row, self.target_tick, self.config):
+                    if self.state not in {"PAUSED", "COOLDOWN"} or self._has_live_target_orders():
+                        self._pause(row, "quote_spread_guard")
                 else:
                     fill = self._first_target_fill(row)
                     if fill is not None:
@@ -647,7 +690,7 @@ class _DayReplay:
 
     def _submit_grid(self, row: pd.Series, reason: str) -> bool:
         key = _row_key(row)
-        if key is None or not self._can_submit(key, 2):
+        if key is None or not _quote_spread_ok(row, self.target_tick, self.config) or not self._can_submit(key, 2):
             return False
         buy_id = self._submit_passive(
             row,
@@ -676,6 +719,10 @@ class _DayReplay:
         self.anchor = float(self.replace["new_anchor"])
         self.grid = build_grid(self.anchor, self.target_tick, self.config)
         self.version += 1
+        if not _quote_spread_ok(row, self.target_tick, self.config):
+            self.replace = None
+            self._pause(row, "quote_spread_guard")
+            return
         if not self._submit_grid(row, "reanchor_replace"):
             self.replace = None
             self._record_transition(row, "PAUSED", "order_action_limit")
@@ -695,7 +742,7 @@ class _DayReplay:
             self._record_transition(row, "FLAT_QUOTING", "replace_complete")
 
     # ------------------------------------------------------------------
-    # 平仓状态：fair 驱动锚点与撤改单
+    # 平仓状态：LastPrice 驱动锚点与撤改单
     # ------------------------------------------------------------------
 
     def _manage_flat_state(self, row: pd.Series) -> None:
@@ -704,29 +751,23 @@ class _DayReplay:
             return
         # 非交易时段或开盘保护：暂停，不挂单。
         if not _row_bool(row, "is_tradable_session", True) or _row_bool(row, "is_open_protected", False):
-            self._pause(row, "fair_invalid_or_session_guard")
+            self._pause(row, "last_price_invalid_or_session_guard")
             return
-        # fair 可用就用 fair；失效则用最新成交价兜底，继续驱动挂单/重定锚，不撤单罢工。
-        # 注意：LastPrice 是目标合约自身价格，乌龙指尖刺时会驱动重定锚追随尖刺，
-        # 极端行情下挂单可能被带至尖刺尾部——这是“fair 失效不罢工”的已知代价。
-        fair = _valid_fair(row)
-        if fair is None:
-            last = _finite_number(row.get("LastPrice"))
-            if last is not None and math.isfinite(last) and last > 0:
-                fair = _round_to_tick(last, self.target_tick)
-            else:
-                self._pause(row, "fair_invalid_or_session_guard")
-                return
+        last_price = _valid_last_price(row)
+        if last_price is None:
+            self._pause(row, "last_price_invalid_or_session_guard")
+            return
+        last_price = _round_to_tick(last_price, self.target_tick)
         if self.state == "PAUSED":
             if not self._has_live_target_orders() and key >= self.cooldown_until_key:
-                self._resume_if_stable(row, fair)
+                self._resume_if_stable(row, last_price)
             return
         if self.state == "COOLDOWN":
             if key >= self.cooldown_until_key and not self._has_live_target_orders():
-                self._resume_if_stable(row, fair)
+                self._resume_if_stable(row, last_price)
             return
         if self.state == "FLAT_QUOTING":
-            self._check_reanchor(row, fair)
+            self._check_reanchor(row, last_price)
 
     def _pause(self, row: pd.Series, reason: str) -> None:
         if self.state not in {"PAUSED", "COOLDOWN"}:
@@ -734,28 +775,31 @@ class _DayReplay:
         self._cancel_target_orders(row, reason)
         self.reanchor_direction = ""
         self.reanchor_started_key = None
-        self.fair_recovered_since_key = None
+        self.last_price_recovered_since_key = None
         if self.state == "COOLDOWN":
             self._record_transition(row, "PAUSED", reason)
 
-    def _resume_if_stable(self, row: pd.Series, fair: float) -> None:
+    def _resume_if_stable(self, row: pd.Series, last_price: float) -> None:
         key = _row_key(row)
         if key is None:
             return
-        if self.fair_recovered_since_key is None:
-            self.fair_recovered_since_key = key
+        if self.last_price_recovered_since_key is None:
+            self.last_price_recovered_since_key = key
             if int(self.config["resume_confirm_ms"]) > 0:
                 return
-        if key - self.fair_recovered_since_key < int(self.config["resume_confirm_ms"]):
+        if key - self.last_price_recovered_since_key < int(self.config["resume_confirm_ms"]):
             return
-        self._start_quoting(row, fair)
+        self._start_quoting(row, last_price)
 
-    def _start_quoting(self, row: pd.Series, fair: float) -> None:
+    def _start_quoting(self, row: pd.Series, last_price: float) -> None:
         key = _row_key(row)
         if key is None:
             return
-        candidate_anchor = _round_to_tick(fair, self.target_tick)
+        candidate_anchor = _round_to_tick(last_price, self.target_tick)
         candidate_grid = build_grid(candidate_anchor, self.target_tick, self.config)
+        if not _quote_spread_ok(row, self.target_tick, self.config):
+            self._pause(row, "quote_spread_guard")
+            return
         if not self._quote_margin_ok(key, candidate_grid):
             self._record_transition(row, "PAUSED", "capital_or_hedge_quote_guard")
             return
@@ -765,21 +809,21 @@ class _DayReplay:
         self.anchor = candidate_anchor
         self.grid = candidate_grid
         self.version += 1
-        self.fair_recovered_since_key = None
-        self._record_transition(row, "FLAT_QUOTING", "fair_recovered")
+        self.last_price_recovered_since_key = None
+        self._record_transition(row, "FLAT_QUOTING", "last_price_recovered")
         if not self._submit_grid(row, "initial_quote"):
             self._record_transition(row, "PAUSED", "order_action_limit")
 
-    def _check_reanchor(self, row: pd.Series, fair: float) -> None:
+    def _check_reanchor(self, row: pd.Series, last_price: float) -> None:
         if not self.grid:
             return
         key = _row_key(row)
         if key is None:
             return
         direction = ""
-        if fair < float(self.grid["band_lower"]):
+        if last_price < float(self.grid["band_lower"]):
             direction = "down"
-        elif fair > float(self.grid["band_upper"]):
+        elif last_price > float(self.grid["band_upper"]):
             direction = "up"
         if not direction:
             self.reanchor_direction = ""
@@ -799,10 +843,10 @@ class _DayReplay:
 
         step_price = float(self.config["reanchor_step_ticks"]) * self.target_tick
         if direction == "down":
-            steps = math.ceil((float(self.grid["band_lower"]) - fair) / step_price - 1e-12)
+            steps = math.ceil((float(self.grid["band_lower"]) - last_price) / step_price - 1e-12)
             new_anchor = float(self.anchor) - max(1, steps) * step_price
         else:
-            steps = math.ceil((fair - float(self.grid["band_upper"])) / step_price - 1e-12)
+            steps = math.ceil((last_price - float(self.grid["band_upper"])) / step_price - 1e-12)
             new_anchor = float(self.anchor) + max(1, steps) * step_price
         self.replace = {
             "old_order_ids": [
@@ -814,19 +858,26 @@ class _DayReplay:
             "new_order_ids": None,
         }
         self.last_reprice_key = key
-        self._record_transition(row, "REPLACE_PENDING", f"fair_{direction}_confirmed")
+        self._record_transition(row, "REPLACE_PENDING", f"last_price_{direction}_confirmed")
         self._cancel_target_orders(row, "reanchor")
         self.reanchor_direction = ""
         self.reanchor_started_key = None
         self._maybe_submit_replacement(row)
 
     def _quote_margin_ok(self, key: int, grid: Mapping[str, float]) -> bool:
+        rate = _commodity_number(self.config, "margin_rate_by_commodity", "default_margin_rate", self.commodity)
+        target_lots = int(self.config["target_lots"])
+        target_margin = max(
+            float(grid["buy_limit"]) * self.target_multiplier * target_lots * rate,
+            float(grid["sell_limit"]) * self.target_multiplier * target_lots * rate,
+        )
+        if not self.config["enable_hedge"]:
+            return target_margin <= float(self.config["account_equity"]) * float(self.config["max_margin_ratio"])
+
         hedge_bid = self._asof_quote(key, "sell", int(self.config["hedge_lots"]))
         hedge_ask = self._asof_quote(key, "buy", int(self.config["hedge_lots"]))
         if hedge_bid is None or hedge_ask is None:
             return False
-        rate = _commodity_number(self.config, "margin_rate_by_commodity", "default_margin_rate", self.commodity)
-        target_lots = int(self.config["target_lots"])
         hedge_lots = int(self.config["hedge_lots"])
         long_margin = (
             float(grid["buy_limit"]) * self.target_multiplier * target_lots * rate
@@ -901,7 +952,15 @@ class _DayReplay:
             "target_exit_order": None,
             "hedge_exit_order": None,
         }
-        self._record_transition(row, "LONG_PENDING_HEDGE" if direction == "long" else "SHORT_PENDING_HEDGE", "target_fill")
+        if self.config["enable_hedge"]:
+            self._record_transition(row, "LONG_PENDING_HEDGE" if direction == "long" else "SHORT_PENDING_HEDGE", "target_fill")
+        else:
+            rate = _commodity_number(self.config, "margin_rate_by_commodity", "default_margin_rate", self.commodity)
+            self.trade["gross_margin"] = (
+                float(order["price"]) * self.target_multiplier * int(self.config["target_lots"]) * rate
+            )
+            self.trade["target_only_exit_due_key"] = key + int(self.config["hedged_exit_delay_ms"])
+            self._record_transition(row, "UNHEDGED_POSITION", "hedge_disabled")
 
     def _handle_opposite_fill(self, row: pd.Series, order: dict[str, Any], evidence: list[str]) -> None:
         if self.trade is None:
@@ -928,6 +987,13 @@ class _DayReplay:
             return
         key = _row_key(row)
         if key is None:
+            return
+        if self.state == "UNHEDGED_POSITION":
+            self._update_worst_mark(row)
+            if key >= int(self.trade["target_only_exit_due_key"]):
+                self.trade["exit_reason"] = "no_hedge_exit"
+                self._record_transition(row, "FLATTENING", "no_hedge_exit")
+                self._try_flatten(row)
             return
         if self.state in {"LONG_PENDING_HEDGE", "SHORT_PENDING_HEDGE"}:
             # 对冲未完成：记录最差浮亏（不触发止损）；尝试对冲；超时则直接平目标腿。
@@ -1289,6 +1355,19 @@ def _fill_evidence(row: pd.Series, order: Mapping[str, Any], config: Mapping[str
     return evidence, partial_unknown
 
 
+def _quote_spread_ok(row: pd.Series, tick_size: float, config: Mapping[str, Any]) -> bool:
+    """目标腿只有在总触达深度严格覆盖 N 倍盘口价差时才允许报价。"""
+    if tick_size <= 0 or not _quote_row_valid(row):
+        return False
+    bid = _finite_number(row.get("BidPrice1"))
+    ask = _finite_number(row.get("AskPrice1"))
+    if bid is None or ask is None:
+        return False
+    spread_ticks = (ask - bid) / tick_size
+    total_quote_ticks = float(config["band_half_width_ticks"]) + float(config["outer_quote_offset_ticks"])
+    return total_quote_ticks > spread_ticks * float(config["quote_spread_multiple"])
+
+
 def _book_price_crosses(row: pd.Series, side: str, limit: float) -> bool:
     """只判断价格相交；调用方据此把一档量不足与无成交证据区分开。"""
     price_col = "AskPrice1" if side == "buy" else "BidPrice1"
@@ -1329,6 +1408,13 @@ def _valid_fair(row: pd.Series) -> float | None:
     if not _row_bool(row, "is_tradable_session", True) or _row_bool(row, "is_open_protected", False):
         return None
     return fair
+
+
+def _valid_last_price(row: pd.Series) -> float | None:
+    last_price = _finite_number(row.get("LastPrice"))
+    if last_price is None or not math.isfinite(last_price) or last_price <= 0:
+        return None
+    return last_price
 
 
 def _fair_price(row: pd.Series) -> float:
@@ -1412,7 +1498,12 @@ def _commodity_number(config: Mapping[str, Any], map_key: str, default_key: str,
 
 
 def _load_required_frames(config: Mapping[str, Any], trade_date: str) -> dict[str, pd.DataFrame]:
-    required = {config["target_contract"], config["hedge_contract"], *config["fair_reference_contracts"]}
+    fair_reference_contracts = set(config["fair_reference_contracts"])
+    if not config["enable_hedge"]:
+        fair_reference_contracts.discard(config["hedge_contract"])
+    required = {config["target_contract"], *fair_reference_contracts}
+    if config["enable_hedge"]:
+        required.add(config["hedge_contract"])
     day_path = _resolve_tick_day_path(Path(str(config["tick_data_root"])), trade_date)
     daily_bounds = load_daily_bounds(trade_date, daily_root=str(config["daily_data_root"]))
     frames: dict[str, pd.DataFrame] = {}
@@ -1543,7 +1634,7 @@ def _summary_row(
         "max_gross_margin": float(margins.max()) if not margins.empty else np.nan,
         "order_action_count": int(order_events.isin(["submit", "cancel_requested"]).sum()),
         "peak_order_actions_per_minute": _peak_actions_per_minute(orders),
-        "reprice_count": int(reasons.isin(["fair_down_confirmed", "fair_up_confirmed"]).sum()),
+        "reprice_count": int(reasons.isin(["last_price_down_confirmed", "last_price_up_confirmed"]).sum()),
         "pause_count": int(((states == "PAUSED") & (reasons != "start")).sum()),
         "hedge_failure_rate": _safe_divide(
             int((trades.get("status", pd.Series(dtype=str)) == "hedge_failure_exit").sum()),
@@ -1599,6 +1690,9 @@ def build_trade_contexts(
     target: pd.DataFrame,
     frames: Mapping[str, pd.DataFrame],
     config: Mapping[str, Any],
+    *,
+    orders: pd.DataFrame | None = None,
+    transitions: pd.DataFrame | None = None,
 ) -> dict[str, dict[str, Any]]:
     """为每笔模拟成交截取入场前 10 秒到退出后 10 秒的行情复盘窗口。"""
     contexts: dict[str, dict[str, Any]] = {}
@@ -1624,6 +1718,22 @@ def build_trade_contexts(
             "退出": _context_key_number(trade.get("exit_key")),
         }
         target_rows = _context_rows(target, start_key, end_key, phases, TARGET_CONTEXT_COLUMNS)
+        tick_size = _frame_tick_size(target, str(config.get("commodity") or ""))
+        pre_fill_quote_rows = _build_pre_fill_quote_rows(
+            target,
+            fill_key,
+            {"目标成交": phases["目标成交"]},
+            config,
+            tick_size,
+            transitions,
+        )
+        flow_events = _build_trade_flow_events(
+            trade,
+            orders,
+            transitions,
+            start_key,
+            end_key,
+        )
         contracts: dict[str, dict[str, Any]] = {}
         reference_contracts = [str(code).upper() for code in config["fair_reference_contracts"]]
         hedge_contract = str(config["hedge_contract"]).upper()
@@ -1655,10 +1765,185 @@ def build_trade_contexts(
                 "参考腿成交": _asof_display_time(frames.get(hedge_contract), phases["参考腿成交"]),
                 "退出": trade.get("exit_time"),
             },
+            "pre_fill_quote_rows": pre_fill_quote_rows,
+            "flow_events": flow_events,
             "target_rows": target_rows,
             "contracts": contracts,
         }
     return contexts
+
+
+def _build_pre_fill_quote_rows(
+    target: pd.DataFrame,
+    fill_key: int,
+    phases: Mapping[str, int | None],
+    config: Mapping[str, Any],
+    tick_size: float | None,
+    transitions: pd.DataFrame | None,
+) -> list[dict[str, Any]]:
+    columns = [*TARGET_CONTEXT_COLUMNS, "market_time_key"]
+    rows = _context_rows(target, fill_key - TRADE_CONTEXT_WINDOW_MS, fill_key, phases, columns)
+    if not rows:
+        return []
+    width = _finite_number(config.get("band_half_width_ticks"))
+    outer = _finite_number(config.get("outer_quote_offset_ticks"))
+    step = _finite_number(config.get("reanchor_step_ticks"))
+    transition_frame = transitions if transitions is not None else pd.DataFrame()
+    if not transition_frame.empty and "market_time_key" in transition_frame:
+        transition_frame = transition_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
+        transition_keys = pd.to_numeric(transition_frame["market_time_key"], errors="coerce").to_numpy(dtype=float)
+    else:
+        transition_keys = np.array([], dtype=float)
+    for row in rows:
+        key = _context_key_number(row.get("market_time_key"))
+        transition = None
+        if key is not None and transition_keys.size:
+            position = int(np.searchsorted(transition_keys, key, side="right") - 1)
+            if position >= 0:
+                transition = transition_frame.iloc[position]
+        anchor = _finite_number(transition.get("grid_anchor") if transition is not None else None)
+        state = str(transition.get("to_state") or "") if transition is not None else ""
+        row.update(
+            {
+                "W_ticks": width,
+                "D_ticks": outer,
+                "S_ticks": step,
+                "grid_anchor": anchor,
+                "band_lower": None,
+                "band_upper": None,
+                "buy_limit": _finite_number(transition.get("buy_limit") if transition is not None else None),
+                "sell_limit": _finite_number(transition.get("sell_limit") if transition is not None else None),
+                "quote_state": state or None,
+                "quote_reason": str(transition.get("reason") or "") if transition is not None else None,
+                "quote_active": state in {"FLAT_QUOTING", "REPLACE_PENDING"},
+            }
+        )
+        if anchor is not None and tick_size is not None:
+            row["band_lower"] = _round_to_tick(anchor - float(width or 0) * tick_size, tick_size)
+            row["band_upper"] = _round_to_tick(anchor + float(width or 0) * tick_size, tick_size)
+        row.pop("market_time_key", None)
+    return rows
+
+
+def _build_trade_flow_events(
+    trade: Mapping[str, Any],
+    orders: pd.DataFrame | None,
+    transitions: pd.DataFrame | None,
+    start_key: int,
+    end_key: int,
+) -> list[dict[str, Any]]:
+    trade_id = str(trade.get("trade_id") or "")
+    fill_key = _context_key_number(trade.get("fill_key"))
+    exit_key = _context_key_number(trade.get("exit_key"))
+    events: list[dict[str, Any]] = []
+    if transitions is not None and not transitions.empty:
+        transition_window = transitions.loc[
+            pd.to_numeric(transitions["market_time_key"], errors="coerce").between(start_key, end_key)
+        ]
+        for row in transition_window.to_dict("records"):
+            to_state = str(row.get("to_state") or "")
+            reason = str(row.get("reason") or "")
+            phase = "目标成交" if reason == "target_fill" else (
+                "未对冲" if reason == "hedge_disabled" else (
+                    "对冲" if reason in {"hedge_fill", "hedge_quote_timeout", "capital_limit_at_hedge"} else (
+                        "平仓" if to_state in {"FLATTENING", "EMERGENCY_FLATTEN"} else "报价状态"
+                    )
+                )
+            )
+            events.append(
+                {
+                    "market_time_key": _context_key_number(row.get("market_time_key")),
+                    "display_time": row.get("display_time"),
+                    "phase": phase,
+                    "event_type": "状态切换",
+                    "action": f"{row.get('from_state') or '—'} → {to_state or '—'}",
+                    "contract": trade.get("target_contract"),
+                    "role": "state",
+                    "side": None,
+                    "price": None,
+                    "lots": None,
+                    "from_state": row.get("from_state"),
+                    "to_state": row.get("to_state"),
+                    "reason": row.get("reason"),
+                    "detail": None,
+                    "_sort_priority": 60 if reason == "target_fill" else (
+                        55 if reason == "hedge_fill" else (90 if to_state == "COOLDOWN" else 10 if phase == "平仓" else 5)
+                    ),
+                }
+            )
+    relevant_order_rows: list[dict[str, Any]] = []
+    if orders is not None and not orders.empty:
+        order_frame = orders.copy()
+        keys = pd.to_numeric(order_frame["market_time_key"], errors="coerce")
+        parent_match = order_frame["parent_order_id"].fillna("").astype(str).eq(trade_id)
+        target_fill = (
+            order_frame["contract"].fillna("").astype(str).str.upper().eq(str(trade.get("target_contract") or "").upper())
+            & order_frame["event"].eq("fill")
+            & keys.eq(fill_key)
+        )
+        target_exit_fill = (
+            order_frame["contract"].fillna("").astype(str).str.upper().eq(str(trade.get("target_contract") or "").upper())
+            & order_frame["event"].eq("fill")
+            & keys.eq(exit_key)
+        )
+        selected = order_frame.loc[
+            keys.between(start_key, end_key)
+            & (parent_match | target_fill | target_exit_fill)
+            & order_frame["event"].isin({"submit", "fill", "quote_unavailable", "capital_rejected"})
+        ]
+        relevant_order_rows = selected.to_dict("records")
+    for row in relevant_order_rows:
+        role = str(row.get("role") or "")
+        phase = "目标成交" if role in TARGET_ORDER_ROLES else ("对冲" if role == "hedge_entry" else "平仓")
+        events.append(
+            {
+                "market_time_key": _context_key_number(row.get("market_time_key")),
+                "display_time": row.get("display_time"),
+                "phase": phase,
+                "event_type": "订单事件",
+                "action": row.get("event"),
+                "contract": row.get("contract"),
+                "role": role,
+                "side": row.get("side"),
+                "price": _finite_number(row.get("price")),
+                "lots": _finite_number(row.get("lots")),
+                "from_state": None,
+                "to_state": row.get("state"),
+                "reason": None,
+                "detail": row.get("detail"),
+                "_sort_priority": {"submit": 20, "quote_unavailable": 25, "capital_rejected": 25, "fill": 50}.get(
+                    str(row.get("event") or ""), 30
+                ),
+            }
+        )
+    has_target_fill = any(
+        event["phase"] == "目标成交" and event["action"] == "fill" for event in events
+    )
+    if fill_key is not None and not has_target_fill:
+        direction = "buy" if trade.get("direction") == "long" else "sell"
+        events.append(
+            {
+                "market_time_key": fill_key,
+                "display_time": trade.get("fill_time"),
+                "phase": "目标成交",
+                "event_type": "订单事件",
+                "action": "fill",
+                "contract": trade.get("target_contract"),
+                "role": "target_buy" if direction == "buy" else "target_sell",
+                "side": direction,
+                "price": _finite_number(trade.get("target_entry_price")),
+                "lots": None,
+                "from_state": None,
+                "to_state": None,
+                "reason": trade.get("fill_evidence"),
+                "detail": "成交证据",
+                "_sort_priority": 40,
+            }
+        )
+    events.sort(key=lambda event: (event["market_time_key"] is None, event["market_time_key"] or 0, event["_sort_priority"]))
+    for event in events:
+        event.pop("_sort_priority", None)
+    return events
 
 
 def _attach_context_metrics(target: pd.DataFrame, tick_size: float | None) -> None:
@@ -1789,7 +2074,7 @@ thead th{background:#f7f9fc}.scroll,.table-wrap{max-height:560px;overflow:auto;b
 const data=JSON.parse(document.getElementById('sim-payload').textContent);
 const eventLabels={detector_event_fill:'候选事件成交',normal_move_fill:'正常行情成交'};
 const statusLabels={closed:'已正常退出',hedge_failure_exit:'对冲失败退出',capital_limit_exit:'保证金限制退出',unclosed_end_of_day:'收盘未平'};
-const exitLabels={hedged_exit:'对冲后平仓',emergency_flatten:'紧急平仓',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
+const exitLabels={hedged_exit:'对冲后平仓',no_hedge_exit:'无对冲延迟平仓',emergency_flatten:'紧急平仓',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
 const evidenceLabels={last_trade:'LastPrice',interval_vwap:'区间均价',top_of_book:'买卖一'};
 const trades=data.trades||[],tradeContexts=data.trade_contexts||{};
 const targetColumns=[['关键时点','关键时点'],['display_time','更新时间'],['LastPrice','最新成交价'],['Volume','累计成交量'],['Turnover','累计成交额'],['BidPrice1','买一价'],['BidVolume1','买一量'],['AskPrice1','卖一价'],['AskVolume1','卖一量'],['delta_volume','区间增量成交量'],['delta_turnover','区间增量成交额'],['interval_vwap','区间成交均价'],['fair_price','合理价'],['last_down_ticks','末笔向下偏离_跳'],['fair_price_reliable','合理价可靠'],['valid_peer_count','有效参考数'],['peer_contracts','有效参考合约']];
@@ -1804,6 +2089,32 @@ function openTradeDetail(trade){const context=tradeContexts[tradeContextKey(trad
 function fillOptions(id,values,labels={}){const el=document.getElementById(id),old=el.value;el.innerHTML='<option value="">全部</option>'+[...new Set(values.filter(Boolean))].sort().map(x=>'<option value="'+x+'">'+(labels[x]||labelEvidence(x))+'</option>').join('');el.value=old;}
 function renderTrades(){const event=document.getElementById('event-filter').value,direction=document.getElementById('direction-filter').value,evidence=document.getElementById('evidence-filter').value,exit=document.getElementById('exit-filter').value;const rows=trades.filter(x=>(!event||x.event_label===event)&&(!direction||x.direction===direction)&&(!evidence||x.fill_evidence===evidence)&&(!exit||x.exit_reason===exit));document.getElementById('trade-count').textContent=rows.length+' 笔';document.getElementById('trade-body').innerHTML=rows.sort((a,b)=>Number(a.fill_key)-Number(b.fill_key)).map(x=>'<tr><td>'+display(x.trade_date)+'</td><td>'+x.fill_time+'</td><td>'+(x.direction==='long'?'买入目标':'卖出目标')+'</td><td><span class="tag '+(x.event_label==='normal_move_fill'?'warn':'good')+'">'+(eventLabels[x.event_label]||x.event_label)+'</span></td><td>'+labelEvidence(x.fill_evidence)+'</td><td>'+number(x.target_entry_price)+'</td><td>'+number(x.hedge_entry_price)+'</td><td>'+(exitLabels[x.exit_reason]||x.exit_reason||'—')+'</td><td>'+money(x.target_pnl)+'</td><td class="'+(Number(x.net_pnl)<0?'negative':'positive')+'">'+money(x.net_pnl)+'</td><td>'+money(x.unhedged_worst_mark_pnl)+'</td><td><button class="detail-button" data-context="'+tradeContextKey(x)+'">查看详情</button></td></tr>').join('')||'<tr><td colspan="12">当前筛选下无成交。</td></tr>';document.querySelectorAll('[data-context]').forEach(button=>button.onclick=()=>openTradeDetail(trades.find(x=>tradeContextKey(x)===button.dataset.context)));}
 function init(){fillOptions('evidence-filter',trades.map(x=>x.fill_evidence));fillOptions('exit-filter',trades.map(x=>x.exit_reason),exitLabels);['event-filter','direction-filter','evidence-filter','exit-filter'].forEach(id=>document.getElementById(id).onchange=renderTrades);document.getElementById('modal-close').onclick=()=>document.getElementById('trade-modal').classList.add('hidden');document.getElementById('trade-modal').onclick=e=>{if(e.target.id==='trade-modal')e.currentTarget.classList.add('hidden')};document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById('trade-modal').classList.add('hidden')});renderTrades();}
+function flowTableEnhanced(events){
+const roleLabels={state:'状态',target_buy:'目标买单',target_sell:'目标卖单',hedge_entry:'对冲开仓',target_exit:'目标平仓',hedge_exit:'对冲平仓'};
+const actionLabels={state_change:'状态切换',submit:'提交',fill:'成交',quote_unavailable:'盘口不可用',capital_rejected:'资金限制'};
+const stateLabels={PAUSED:'暂停',FLAT_QUOTING:'双向挂单',REPLACE_PENDING:'重定锚换单',COOLDOWN:'冷却',LONG_PENDING_HEDGE:'多头待对冲',SHORT_PENDING_HEDGE:'空头待对冲',UNHEDGED_POSITION:'未对冲持仓',HEDGED_POSITION:'已对冲持仓',FLATTENING:'平仓中',EMERGENCY_FLATTEN:'紧急平仓'};
+const value=(row,key)=>{if(key==='role')return roleLabels[row[key]]||row[key]||'—';if(key==='action')return actionLabels[row[key]]||row[key]||'—';if(key==='side')return row[key]==='buy'?'买入':row[key]==='sell'?'卖出':'—';if(key==='from_state'||key==='to_state')return stateLabels[row[key]]||row[key]||'—';return display(row[key]);};
+const columns=[['display_time','时间'],['phase','阶段'],['event_type','类型'],['contract','合约'],['role','角色'],['side','方向'],['action','动作'],['price','价格'],['lots','手数'],['from_state','原状态'],['to_state','新状态'],['reason','原因'],['detail','说明']];
+const head=columns.map(([,label])=>`<th>${label}</th>`).join('');
+const body=(events||[]).map(row=>`<tr>${columns.map(([key])=>`<td>${value(row,key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${columns.length}">没有可用的关键流程记录。</td></tr>`;
+return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function openTradeDetail(trade){
+const context=tradeContexts[tradeContextKey(trade)];
+if(!context){alert('该笔交易未生成复盘上下文。');return}
+document.getElementById('modal-title').textContent=trade.trade_id;
+const phaseTimes=context.phase_times||{};
+const cfg=data.config||{};
+const hold=trade.exit_key===null||trade.exit_key===undefined?'—':((Number(trade.exit_key)-Number(trade.fill_key))/1000).toFixed(1)+' 秒';
+const cards=[['交易日',display(trade.trade_date)],['目标/对冲合约',`${trade.target_contract} / ${trade.hedge_contract||'—'}`],['W / D / S',`${number(cfg.band_half_width_ticks)} / ${number(cfg.outer_quote_offset_ticks)} / ${number(cfg.reanchor_step_ticks)} tick`],['对冲',cfg.enable_hedge?'开启':'关闭'],['价差倍数 N',number(cfg.quote_spread_multiple)],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['对冲成交价',`${trade.hedge_contract||'—'}：${number(trade.hedge_entry_price)}`],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',money(trade.target_pnl)+' / '+money(trade.hedge_pnl)],['净收益',money(trade.net_pnl)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];
+document.getElementById('modal-cards').innerHTML=cards.map(([k,v])=>'<div class="card"><span>'+k+'</span><strong>'+v+'</strong></div>').join('');
+const quoteColumns=[['关键时点','关键时点'],['display_time','更新时间'],['W_ticks','W（tick）'],['D_ticks','D（tick）'],['S_ticks','S（tick）'],['fair_price','合理价'],['fair_price_reliable','合理价可靠'],['grid_anchor','报价锚点'],['band_lower','合理价带下限'],['band_upper','合理价带上限'],['buy_limit','买入挂单价'],['sell_limit','卖出挂单价'],['quote_state','报价状态'],['quote_reason','状态原因'],['quote_active','报价有效'],['LastPrice','最新成交价'],['interval_vwap','区间成交均价'],['BidPrice1','买一价'],['AskPrice1','卖一价']];
+let content='<h2>成交前 10 秒报价计算</h2>'+contextTable(context.pre_fill_quote_rows||[],quoteColumns)+'<h2>交易全流程</h2>'+flowTableEnhanced(context.flow_events||[])+'<h2>目标合约快照</h2><p class="muted">完整持仓窗口：'+display(context.window.start_time)+' 至 '+display(context.window.end_time)+'（目标成交前 '+number(context.window.before_after_ms/1000)+' 秒至退出后 '+number(context.window.before_after_ms/1000)+' 秒）</p>'+contextTable(context.target_rows,targetColumns,true);
+Object.entries(context.contracts||{}).forEach(([code,part])=>{content+='<h3 class="contract-title">'+code+' <span class="muted">'+(part.roles||[]).join(' / ')+'</span></h3>'+contextTable(part.rows||[],referenceColumns)});
+document.getElementById('modal-content').innerHTML=content;
+document.getElementById('modal-raw').textContent=JSON.stringify(trade,null,2);
+document.getElementById('trade-modal').classList.remove('hidden');
+}
 init();
 </script>
 </body>

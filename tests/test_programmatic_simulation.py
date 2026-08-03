@@ -8,9 +8,11 @@ from src.programmatic_simulation import (
     DEFAULT_CONFIG,
     _DayReplay,
     _fill_evidence,
+    _quote_spread_ok,
     _simulate_programmatic_day_prepared,
     build_programmatic_summary,
     build_grid,
+    normalize_programmatic_simulation_config,
     simulate_programmatic_day,
 )
 
@@ -140,6 +142,93 @@ def test_grid_and_normal_fill_then_programmatic_hedge_and_exit():
     assert "top_of_book" in trade["fill_evidence"]
 
 
+def test_no_hedge_mode_skips_hedge_and_flattens_target_after_delay():
+    target = _frame(
+        "L2609",
+        [
+            _row(0),
+            _row(500, last=80, vwap=80, bid=79, ask=80),
+            _row(1000),
+            _row(1500),
+        ],
+    ).assign(commodity="L", contract_multiplier=5)
+    result = simulate_programmatic_day(
+        target,
+        pd.DataFrame(),
+        _config(enable_hedge=False, hedged_exit_delay_ms=1000),
+        trade_date="20260302",
+    )
+
+    trade = result["trades"].iloc[0]
+    assert result["orders"].loc[result["orders"]["role"] == "hedge_entry"].empty
+    assert result["orders"].loc[result["orders"]["role"] == "hedge_exit"].empty
+    assert "UNHEDGED_POSITION" in result["transitions"]["to_state"].tolist()
+    assert trade["exit_reason"] == "no_hedge_exit"
+    assert trade["target_entry_price"] == pytest.approx(80)
+    assert trade["target_exit_price"] == pytest.approx(100)
+    assert trade["target_pnl"] == pytest.approx(100)
+    assert trade["gross_pnl"] == pytest.approx(100)
+    assert trade["net_pnl"] == pytest.approx(100)
+    assert trade["gross_margin"] == pytest.approx(40)
+    assert pd.isna(trade["hedge_entry_price"])
+    assert pd.isna(trade["hedge_exit_price"])
+    assert pd.isna(trade["hedge_pnl"])
+
+
+def test_quote_spread_guard_uses_strict_tick_multiple_and_rejects_invalid_book():
+    config = _config(quote_spread_multiple=2)
+    allowed = _frame("NI2605", [_row(0, bid=100, ask=105)]).iloc[0]
+    equal = _frame("NI2605", [_row(0, bid=100, ask=110)]).iloc[0]
+    invalid = _frame("NI2605", [_row(0, bid=0, ask=105)]).iloc[0]
+
+    assert _quote_spread_ok(allowed, 1.0, config) is True
+    assert _quote_spread_ok(equal, 1.0, config) is False
+    assert _quote_spread_ok(invalid, 1.0, config) is False
+
+
+def test_quote_spread_multiple_defaults_to_two_and_rejects_nonpositive_values():
+    raw = {
+        "tick_data_root": "data/tick2026",
+        "daily_data_root": "data/1d_futures",
+        "output_dir": "tmp/sim",
+        "trade_date_start": "20260301",
+        "trade_date_end": "20260301",
+        "commodity": "NI",
+        "target_contract": "NI2605",
+        "fair_reference_contracts": ["NI2604", "NI2609"],
+        "hedge_contract": "NI2604",
+    }
+    assert normalize_programmatic_simulation_config(raw)["quote_spread_multiple"] == 2
+    assert normalize_programmatic_simulation_config(raw)["enable_hedge"] is True
+    assert normalize_programmatic_simulation_config({**raw, "enable_hedge": False})["enable_hedge"] is False
+    for value in (0, -1, "bad"):
+        with pytest.raises(ValueError, match="quote_spread_multiple"):
+            normalize_programmatic_simulation_config({**raw, "quote_spread_multiple": value})
+    for value in (None, 0, 1, "bad"):
+        with pytest.raises(ValueError, match="enable_hedge"):
+            normalize_programmatic_simulation_config({**raw, "enable_hedge": value})
+
+
+def test_quote_spread_guard_cancels_existing_target_orders_before_fill():
+    target = _frame(
+        "NI2605",
+        [
+            _row(0, bid=100, ask=101),
+            _row(500, last=80, vwap=80, bid=50, ask=100),
+            _row(1000, bid=100, ask=101),
+            _row(1500, bid=100, ask=101),
+            _row(2000, last=80, vwap=80, bid=79, ask=80),
+        ],
+    )
+
+    result = simulate_programmatic_day(target, _hedge(), _config(), trade_date="20260302")
+
+    assert len(result["trades"]) == 1
+    assert result["trades"].iloc[0]["fill_key"] == 2000
+    assert (result["transitions"]["reason"] == "quote_spread_guard").any()
+    assert (result["orders"]["event"] == "cancel_requested").any()
+
+
 def test_replay_state_machine_does_not_use_dataframe_iterrows(monkeypatch):
     def _unexpected_iterrows(*_args, **_kwargs):
         raise AssertionError("状态机不应逐行创建 pandas Series")
@@ -232,7 +321,7 @@ def test_book_cross_with_insufficient_one_level_volume_is_not_silent_full_fill()
     assert partial_unknown is True
 
 
-def test_fair_only_reanchors_after_confirmation_and_keeps_order_when_target_last_moves():
+def test_last_price_reanchors_after_confirmation_and_keeps_order_when_fair_is_same():
     target = _frame(
         "NI2605",
         [
@@ -251,6 +340,58 @@ def test_fair_only_reanchors_after_confirmation_and_keeps_order_when_target_last
     assert completed["grid_anchor"] == pytest.approx(90)
     assert completed["buy_limit"] == pytest.approx(70)
     assert completed["sell_limit"] == pytest.approx(110)
+    assert "last_price_down_confirmed" in result["transitions"]["reason"].tolist()
+
+
+def test_reliable_fair_does_not_override_last_price_initial_anchor():
+    target = _frame(
+        "NI2605",
+        [_row(0, last=100, fair=130), _row(500, last=100, fair=130)],
+    )
+
+    result = simulate_programmatic_day(
+        target, _hedge(), _config(resume_confirm_ms=0), trade_date="20260302"
+    )
+
+    quoted = result["transitions"].loc[result["transitions"]["reason"] == "last_price_recovered"].iloc[0]
+    assert quoted["grid_anchor"] == pytest.approx(100)
+    assert quoted["buy_limit"] == pytest.approx(80)
+    assert quoted["sell_limit"] == pytest.approx(120)
+
+
+def test_fair_changes_without_last_price_change_do_not_change_orders_or_reanchors():
+    base = [
+        _row(0),
+        _row(500),
+        _row(1000, last=80, vwap=80, bid=79, ask=80),
+        _row(1500, last=100, vwap=100, bid=100, ask=101),
+    ]
+    changed_fair = [dict(row, fair=130 if row["market_time_key"] else 70) for row in base]
+    first = simulate_programmatic_day(
+        _frame("NI2605", base), _hedge(), _config(resume_confirm_ms=0), trade_date="20260302"
+    )
+    second = simulate_programmatic_day(
+        _frame("NI2605", changed_fair), _hedge(), _config(resume_confirm_ms=0), trade_date="20260302"
+    )
+
+    columns = ["market_time_key", "to_state", "reason", "grid_anchor", "buy_limit", "sell_limit"]
+    assert_frame_equal(first["transitions"][columns], second["transitions"][columns])
+    assert_frame_equal(first["orders"], second["orders"])
+    trade_columns = [
+        "trade_id", "direction", "fill_key", "target_entry_price", "hedge_entry_price",
+        "target_exit_price", "hedge_exit_price", "net_pnl", "status",
+    ]
+    assert_frame_equal(first["trades"][trade_columns], second["trades"][trade_columns])
+
+
+def test_invalid_last_price_pauses_without_target_orders():
+    target = _frame("NI2605", [_row(0), _row(500, last=float("nan"))])
+
+    result = simulate_programmatic_day(target, _hedge(), _config(resume_confirm_ms=0), trade_date="20260302")
+
+    assert result["trades"].empty
+    assert (result["orders"]["event"] == "cancel_requested").any()
+    assert "last_price_invalid_or_session_guard" in result["transitions"]["reason"].tolist()
 
 
 def test_old_order_can_fill_before_cancel_ack_and_is_labeled_replace_race():
@@ -322,7 +463,7 @@ def test_single_bad_fair_snapshot_does_not_create_a_cancel_and_requote_cycle():
         trade_date="20260302",
     )
 
-    assert "fair_invalid_or_session_guard" not in result["transitions"]["reason"].tolist()
+    assert "last_price_invalid_or_session_guard" not in result["transitions"]["reason"].tolist()
     assert "cancel_requested" not in result["orders"]["event"].tolist()
 
 
@@ -356,9 +497,9 @@ def test_summary_counts_only_real_reanchors_and_not_the_initial_paused_state():
     transitions = pd.DataFrame(
         [
             {"trade_date": "20260302", "to_state": "PAUSED", "reason": "start"},
-            {"trade_date": "20260302", "to_state": "FLAT_QUOTING", "reason": "fair_recovered"},
-            {"trade_date": "20260302", "to_state": "REPLACE_PENDING", "reason": "fair_down_confirmed"},
-            {"trade_date": "20260302", "to_state": "REPLACE_PENDING", "reason": "fair_up_confirmed"},
+            {"trade_date": "20260302", "to_state": "FLAT_QUOTING", "reason": "last_price_recovered"},
+            {"trade_date": "20260302", "to_state": "REPLACE_PENDING", "reason": "last_price_down_confirmed"},
+            {"trade_date": "20260302", "to_state": "REPLACE_PENDING", "reason": "last_price_up_confirmed"},
             {"trade_date": "20260302", "to_state": "PAUSED", "reason": "data_gap"},
         ]
     )
@@ -400,8 +541,8 @@ def test_hedged_exit_defers_flatten_until_delay():
     assert int(trade["exit_key"]) - int(trade["hedge_entry_key"]) >= 1000
 
 
-def test_fair_invalid_falls_back_to_last_price_for_quoting():
-    """fair 失效时用最新成交价兜底继续报价，不 pause。"""
+def test_unreliable_fair_does_not_affect_last_price_quoting():
+    """fair 失效时仍用最新成交价报价，不 pause。"""
     target = _frame(
         "NI2605",
         [
@@ -416,4 +557,4 @@ def test_fair_invalid_falls_back_to_last_price_for_quoting():
     )
     states = result["transitions"]["to_state"].tolist()
     assert "FLAT_QUOTING" in states
-    assert "fair_invalid_or_session_guard" not in result["transitions"]["reason"].tolist()
+    assert "last_price_invalid_or_session_guard" not in result["transitions"]["reason"].tolist()

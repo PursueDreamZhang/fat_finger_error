@@ -22,6 +22,8 @@
     },
     "target_lots": 1,
     "hedge_lots": 1,
+    "enable_hedge": true,
+    "quote_spread_multiple": 2,
     "max_order_actions_per_minute": 20,
     "max_quote_age_ms": 3000,
     "max_fair_age_ms": 3000,

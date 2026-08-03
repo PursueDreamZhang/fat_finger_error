@@ -12,7 +12,7 @@ S：重定锚步长
 T = W + D
 ```
 
-它按 P50/P70/P85 展开价格深度组合，但不生成回放配置，不计算成交、收益、对冲或风控，也不输出报告。回放器负责使用这些组合做后续验证。
+默认按 P70/P85 展开价格深度组合，但不生成回放配置，不计算成交、收益、对冲或风控，也不输出报告。回放器负责使用这些组合做后续验证。
 
 ## 2. 输入
 
@@ -42,13 +42,15 @@ tick_candidate_events_annotated_confirmed_depth.csv
 每个合约至少需要 4 条合格事件。满足后按下列组合计算：
 
 ```text
-T = ceil(P50/P70/P85(事件确认深度_跳))
+T = ceil(P70/P85(事件确认深度_跳))
 W = ceil(T × 0.40) 或 ceil(T × 0.55)
 D = T - W
 S = ceil(W × 0.50) 或 W
 ```
 
-每个不重复的 T 默认最多有 `2 个 W × 2 个 S = 4` 行组合。取整后相同的 `T/W/D/S` 会合并，避免重复行；是否适合交易由回放器判断。
+每个不重复的 T 默认最多有 `2 个 W × 2 个 S = 4` 行组合，因此每个合约默认最多输出 2 个 T、8 行 W/D/S。取整后相同的 `T/W/D/S` 会合并，避免重复行；是否适合交易由回放器判断。
+
+如需恢复最低档 P50，可在自定义配置中显式指定 `total_touch_quantiles`，例如 `[0.5, 0.7, 0.85]`。历史阶段 6 的 P50/P70/P85 验收脚本不属于本生成器默认输出范围，本次不修改其逻辑。
 
 可选 `--config` 只允许调整基础筛选和组合公式：
 
@@ -56,7 +58,7 @@ S = ceil(W × 0.50) 或 W
 {
   "min_eligible_samples": 4,
   "max_fair_uncertainty_ticks": 10.0,
-  "total_touch_quantiles": [0.5, 0.7, 0.85],
+  "total_touch_quantiles": [0.7, 0.85],
   "width_ratios": [0.4, 0.55],
   "step_ratios": [0.5, 1.0]
 }
@@ -82,7 +84,7 @@ parameter_shapes.csv
 commodity,target_contract,T_ticks,W_ticks,D_ticks,S_ticks
 ```
 
-三月数据中的 AP605 默认会输出 P50/P70/P85 下的多个 `T/W/D/S` 组合。
+三月数据中的 AP605 默认会输出 P70/P85 下的多个 `T/W/D/S` 组合。
 
 ```text
 AP,AP605,85,34,51,17

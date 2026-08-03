@@ -1,3 +1,0 @@
-﻿scope,trade_date,target_contract,fill_count,detector_event_fill_count,normal_move_fill_count,fill_during_replace_count,closed_count,hedge_failure_count,capital_limit_exit_count,net_pnl,win_rate,worst_net_pnl,max_gross_margin,order_action_count,peak_order_actions_per_minute,reprice_count,pause_count,hedge_failure_rate
-overall,ALL,AP605,840,3,837,3,839,6,0,52524.0,1.0,1.0,2053.8,5110,63,12,21,0.007142857142857143
-day,20260303,AP605,840,3,837,3,839,6,0,52524.0,1.0,1.0,2053.8,5110,63,12,21,0.007142857142857143

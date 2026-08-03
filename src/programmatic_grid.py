@@ -1,4 +1,4 @@
-"""V2 参数网格回放：缓存每日 fair，只重复执行状态机。"""
+"""V2 参数网格回放：缓存每日 fair 诊断数据，重复执行 LastPrice 驱动状态机。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from src.programmatic_simulation import (
     _resolve_tick_day_path,
     _simulate_programmatic_day_prepared,
     _attach_context_metrics,
+    _as_bool,
     attach_fair_price_metrics,
     build_programmatic_summary,
     build_trade_contexts,
@@ -36,6 +37,8 @@ _PATH_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
 GRID_SCENARIO_COLUMNS = [
     "scenario_id",
     "instrument",
+    "quote_spread_multiple",
+    "enable_hedge",
     "band_half_width_ticks",
     "outer_quote_offset_ticks",
     "reanchor_step_ticks",
@@ -110,6 +113,7 @@ def normalize_programmatic_grid_config(raw: Mapping[str, Any]) -> dict[str, Any]
         raise ValueError("网格配置缺少 output_dir")
     base = dict(DEFAULT_CONFIG)
     base.update(dict(config.get("base") or {}))
+    base["enable_hedge"] = _as_bool(base.get("enable_hedge"), "base.enable_hedge")
     base["output_dir"] = output_dir
     instruments = config.get("instruments")
     if not isinstance(instruments, list) or not instruments:
@@ -178,10 +182,13 @@ def normalize_programmatic_grid_config(raw: Mapping[str, Any]) -> dict[str, Any]
 
 def build_grid_scenarios(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
+    base = config.get("base") or {}
     for shape_index, shape in enumerate(config["quote_shapes"], start=1):
         for latency_index, latency in enumerate(config["latency_profiles"], start=1):
             scenario = {
                 "scenario_id": f"Q{shape_index:02d}-L{latency_index:02d}",
+                "quote_spread_multiple": float(base.get("quote_spread_multiple", 2.0)),
+                "enable_hedge": base.get("enable_hedge", True),
                 "band_half_width_ticks": float(shape["W"]),
                 "outer_quote_offset_ticks": float(shape["D"]),
                 "reanchor_step_ticks": float(shape["S"]),
@@ -243,7 +250,7 @@ def run_programmatic_grid(
                 started = perf_counter() if timings is not None else None
                 day = _simulate_programmatic_day_prepared(
                     enriched,
-                    frames[scenario_config["hedge_contract"]],
+                    frames.get(scenario_config["hedge_contract"], pd.DataFrame()),
                     scenario_config,
                     trade_date=trade_date,
                     detector_event_keys=event_keys,
@@ -294,6 +301,8 @@ def run_programmatic_grid(
                                 enriched,
                                 frames,
                                 scenario_config,
+                                orders=day["orders"],
+                                transitions=day["transitions"],
                             )
                         )
                         _add_timing(timings, "trade_context", started)
@@ -342,7 +351,12 @@ def _prepare_grid_day(
         return f"day_load_failed: {exc}"
     _add_timing(timings, "data_load", started)
     frames = {contract: _stable_sorted_frame(frame) for contract, frame in frames.items()}
-    required = {config["target_contract"], config["hedge_contract"], *config["fair_reference_contracts"]}
+    fair_reference_contracts = set(config["fair_reference_contracts"])
+    if not config["enable_hedge"]:
+        fair_reference_contracts.discard(config["hedge_contract"])
+    required = {config["target_contract"], *fair_reference_contracts}
+    if config["enable_hedge"]:
+        required.add(config["hedge_contract"])
     missing = sorted(contract for contract in required if contract not in frames)
     if missing:
         return f"contract_missing: {','.join(missing)}"
@@ -360,7 +374,11 @@ def _prepare_grid_day(
         _add_timing(timings, "fair_prepare", started)
         return cached, frames, event_keys
     started = perf_counter() if timings is not None else None
-    refs = {contract: frames[contract] for contract in config["fair_reference_contracts"]}
+    refs = {
+        contract: frames[contract]
+        for contract in config["fair_reference_contracts"]
+        if contract in frames
+    }
     enriched = attach_fair_price_metrics(
         target,
         refs,
@@ -628,7 +646,7 @@ const data=JSON.parse(document.getElementById('grid-payload').textContent);
 const reasonLabels={insufficient_fills:'成交次数不足',insufficient_detector_event_fills:'候选事件成交不足',normal_move_fill_rate_too_high:'正常行情误成交过高',hedge_failure_rate_too_high:'对冲失败率过高',daily_loss_too_high:'单日亏损超限',order_action_limit_exceeded:'报撤动作超限',net_pnl_not_positive:'净收益不为正'};
 const eventLabels={detector_event_fill:'候选事件成交',normal_move_fill:'正常行情成交'};
 const statusLabels={closed:'已正常退出',hedge_failure_exit:'对冲失败退出',capital_limit_exit:'保证金限制退出',unclosed_end_of_day:'收盘未平'};
-const exitLabels={hedged_exit:'对冲后平仓',emergency_flatten:'紧急平仓',hedge_failure:'对冲失败',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
+const exitLabels={hedged_exit:'对冲后平仓',no_hedge_exit:'无对冲延迟平仓',emergency_flatten:'紧急平仓',hedge_failure:'对冲失败',hedge_failure_exit:'对冲失败退出',end_of_day_exit:'收盘平仓'};
 const evidenceLabels={last_trade:'LastPrice',interval_vwap:'区间均价',top_of_book:'买卖一'};
 const keyOf=r=>r.instrument+'::'+r.scenario_id;
 const number=v=>v===null||v===undefined||Number.isNaN(Number(v))?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2});
@@ -643,10 +661,10 @@ const targetColumns=[['关键时点','关键时点'],['display_time','更新时�
 const referenceColumns=[['关键时点','关键时点'],['display_time','更新时间'],['LastPrice','最新成交价'],['Volume','累计成交量'],['Turnover','累计成交额'],['BidPrice1','买一价'],['BidVolume1','买一量'],['AskPrice1','卖一价'],['AskVolume1','卖一量'],['AveragePrice','原始平均价'],['OpenInterest','持仓量'],['UpperLimitPrice','涨停价'],['LowerLimitPrice','跌停价'],['delta_volume','区间增量成交量'],['delta_turnover','区间增量成交额'],['interval_vwap','区间成交均价']];
 let selectedKey='';
 function overview(){const filled=summary.filter(x=>Number(x.fill_count)>0), actions=summary.filter(x=>Number(x.peak_order_actions_per_minute)>Number(threshold)).length;const cards=[['参数组合',summary.length],['有模拟成交',filled.length],['总模拟成交',summary.reduce((n,x)=>n+Number(x.fill_count||0),0)],['候选事件成交',summary.reduce((n,x)=>n+Number(x.detector_event_fill_count||0),0)],['正常行情成交',summary.reduce((n,x)=>n+Number(x.normal_move_fill_count||0),0)],['对冲失败',summary.reduce((n,x)=>n+Number(x.hedge_failure_count||0),0)],['累计净收益',money(summary.reduce((n,x)=>n+Number(x.net_pnl||0),0))],['动作峰值超限组合',actions]];document.getElementById('overview').innerHTML=cards.map(([k,v])=>`<div class="card"><span>${k}</span><strong>${v}</strong></div>`).join('');}
-function scenarioCard(row,isZero=false){const selected=keyOf(row)===selectedKey?' selected':'';const risk=Number(row.normal_move_fill_rate)>0?'warn':'';return `<article class="scenario${selected}" data-key="${keyOf(row)}"><div class="scenario-head"><div><div class="scenario-title">${row.instrument} · ${row.scenario_id}</div><div class="muted">W/D/S：${number(row.band_half_width_ticks)} / ${number(row.outer_quote_offset_ticks)} / ${number(row.reanchor_step_ticks)} ｜ 撤单/新单/对冲 ACK：${number(row.cancel_ack_latency_ms)}/${number(row.new_order_ack_latency_ms)}/${number(row.hedge_submit_latency_ms)} ms</div></div><div>${reasonTags(row.selection_reason)}</div></div><div class="metrics"><span class="metric">总成交 ${number(row.fill_count)}</span><span class="metric ${Number(row.detector_event_fill_count)>0?'good':''}">候选事件 ${number(row.detector_event_fill_count)}</span><span class="metric ${risk}">正常行情 ${number(row.normal_move_fill_count)}（${percent(row.normal_move_fill_rate)}）</span><span class="metric ${Number(row.net_pnl)<0?'bad':'good'}">净收益 ${money(row.net_pnl)}</span><span class="metric">最差日 ${money(row.worst_day_net_pnl)}</span><span class="metric ${Number(row.hedge_failure_count)>0?'bad':''}">对冲失败 ${number(row.hedge_failure_count)}</span><span class="metric ${Number(row.peak_order_actions_per_minute)>Number(threshold)?'bad':''}">动作峰值 ${number(row.peak_order_actions_per_minute)}/分</span></div></article>`;}
+function scenarioCard(row,isZero=false){const selected=keyOf(row)===selectedKey?' selected':'';const risk=Number(row.normal_move_fill_rate)>0?'warn':'';return `<article class="scenario${selected}" data-key="${keyOf(row)}"><div class="scenario-head"><div><div class="scenario-title">${row.instrument} · ${row.scenario_id}</div><div class="muted">W/D/S：${number(row.band_half_width_ticks)} / ${number(row.outer_quote_offset_ticks)} / ${number(row.reanchor_step_ticks)} ｜ 对冲：${row.enable_hedge?'开启':'关闭'} ｜ 价差 N：${number(row.quote_spread_multiple)} ｜ 撤单/新单/对冲 ACK：${number(row.cancel_ack_latency_ms)}/${number(row.new_order_ack_latency_ms)}/${number(row.hedge_submit_latency_ms)} ms</div></div><div>${reasonTags(row.selection_reason)}</div></div><div class="metrics"><span class="metric">总成交 ${number(row.fill_count)}</span><span class="metric ${Number(row.detector_event_fill_count)>0?'good':''}">候选事件 ${number(row.detector_event_fill_count)}</span><span class="metric ${risk}">正常行情 ${number(row.normal_move_fill_count)}（${percent(row.normal_move_fill_rate)}）</span><span class="metric ${Number(row.net_pnl)<0?'bad':'good'}">净收益 ${money(row.net_pnl)}</span><span class="metric">最差日 ${money(row.worst_day_net_pnl)}</span><span class="metric ${Number(row.hedge_failure_count)>0?'bad':''}">对冲失败 ${number(row.hedge_failure_count)}</span><span class="metric ${Number(row.peak_order_actions_per_minute)>Number(threshold)?'bad':''}">动作峰值 ${number(row.peak_order_actions_per_minute)}/分</span></div></article>`;}
 function renderScenarios(){const instrument=document.getElementById('instrument-filter').value;const filled=summary.filter(x=>Number(x.fill_count)>0&&(!instrument||x.instrument===instrument)).sort((a,b)=>Number(b.detector_event_fill_count)-Number(a.detector_event_fill_count)||Number(a.normal_move_fill_rate??99)-Number(b.normal_move_fill_rate??99)||Number(b.net_pnl)-Number(a.net_pnl));if(!selectedKey&&filled.length)selectedKey=keyOf(filled[0]);document.getElementById('scenario-list').innerHTML=filled.map(x=>scenarioCard(x)).join('')||'<div class="panel muted">当前筛选下没有模拟成交。</div>';document.getElementById('filled-count').textContent=`${filled.length} 个有模拟成交的组合`;document.querySelectorAll('#scenario-list .scenario').forEach(x=>x.onclick=()=>{selectedKey=x.dataset.key;renderScenarios();renderDetail();});const zero=summary.filter(x=>Number(x.fill_count)===0&&(!instrument||x.instrument===instrument));document.getElementById('zero-list').innerHTML=zero.map(x=>scenarioCard(x,true)).join('')||'<div class="panel muted">无零成交组合。</div>';}
 function pairs(items){return '<div class="pairs">'+items.map(([k,v])=>`<div><span>${k}</span>${v}</div>`).join('')+'</div>'}
-function renderDetail(){const row=summary.find(x=>keyOf(x)===selectedKey);const section=document.getElementById('detail');if(!row){section.classList.add('hidden');return}section.classList.remove('hidden');document.getElementById('detail-title').textContent=`${row.instrument} · ${row.scenario_id} 组合详情`;const current=trades.filter(x=>keyOf(x)===selectedKey), evidence={};current.forEach(x=>{labelEvidence(x.fill_evidence).split(' + ').forEach(x=>evidence[x]=(evidence[x]||0)+1)});const maxMargin=current.reduce((m,x)=>Math.max(m,Number(x.gross_margin||0)),0);document.getElementById('detail-cards').innerHTML=[['报价参数',pairs([['W/D/S',`${number(row.band_half_width_ticks)} / ${number(row.outer_quote_offset_ticks)} / ${number(row.reanchor_step_ticks)}`],['重定锚确认',number(row.reanchor_confirm_ms)+' ms'],['撤单 ACK',number(row.cancel_ack_latency_ms)+' ms'],['新单 ACK',number(row.new_order_ack_latency_ms)+' ms'],['对冲提交',number(row.hedge_submit_latency_ms)+' ms']])],['成交结构',pairs([['总模拟成交',number(row.fill_count)],['候选事件成交',number(row.detector_event_fill_count)],['正常行情成交',number(row.normal_move_fill_count)],['撤改单期间',number(row.fill_during_replace_count)],['成交证据',Object.entries(evidence).map(([k,v])=>k+' '+v).join('，')||'—']])],['风险结果',pairs([['净收益',money(row.net_pnl)],['胜率',percent(row.win_rate)],['最差单日',money(row.worst_day_net_pnl)],['对冲失败',number(row.hedge_failure_count)],['单笔最大保证金',number(maxMargin)],['动作峰值',number(row.peak_order_actions_per_minute)+'/分']])]].map(([title,body])=>`<div class="panel"><strong>${title}</strong>${body}</div>`).join('');const days=daily.filter(x=>keyOf(x)===selectedKey).sort((a,b)=>String(a.trade_date).localeCompare(String(b.trade_date)));document.getElementById('daily-body').innerHTML=days.map(x=>`<tr class="${Number(x.net_pnl)<0||Number(x.hedge_failure_count)>0||Number(x.peak_order_actions_per_minute)>Number(threshold)?'negative':''}"><td>${x.trade_date}</td><td>${number(x.fill_count)}</td><td>${number(x.detector_event_fill_count)}</td><td>${number(x.normal_move_fill_count)}</td><td>${money(x.net_pnl)}</td><td>${number(x.hedge_failure_count)}</td><td>${number(x.peak_order_actions_per_minute)}</td></tr>`).join('')||'<tr><td colspan="7">无逐日数据</td></tr>';setupTradeFilters(current);renderTrades();document.getElementById('config').textContent=JSON.stringify(data.config,null,2);}
+function renderDetail(){const row=summary.find(x=>keyOf(x)===selectedKey);const section=document.getElementById('detail');if(!row){section.classList.add('hidden');return}section.classList.remove('hidden');document.getElementById('detail-title').textContent=`${row.instrument} · ${row.scenario_id} 组合详情`;const current=trades.filter(x=>keyOf(x)===selectedKey), evidence={};current.forEach(x=>{labelEvidence(x.fill_evidence).split(' + ').forEach(x=>evidence[x]=(evidence[x]||0)+1)});const maxMargin=current.reduce((m,x)=>Math.max(m,Number(x.gross_margin||0)),0);document.getElementById('detail-cards').innerHTML=[['报价参数',pairs([['W/D/S',`${number(row.band_half_width_ticks)} / ${number(row.outer_quote_offset_ticks)} / ${number(row.reanchor_step_ticks)}`],['对冲',row.enable_hedge?'开启':'关闭'],['价差倍数 N',number(row.quote_spread_multiple)],['重定锚确认',number(row.reanchor_confirm_ms)+' ms'],['撤单 ACK',number(row.cancel_ack_latency_ms)+' ms'],['新单 ACK',number(row.new_order_ack_latency_ms)+' ms'],['对冲提交',number(row.hedge_submit_latency_ms)+' ms']])],['成交结构',pairs([['总模拟成交',number(row.fill_count)],['候选事件成交',number(row.detector_event_fill_count)],['正常行情成交',number(row.normal_move_fill_count)],['撤改单期间',number(row.fill_during_replace_count)],['成交证据',Object.entries(evidence).map(([k,v])=>k+' '+v).join('，')||'—']])],['风险结果',pairs([['净收益',money(row.net_pnl)],['胜率',percent(row.win_rate)],['最差单日',money(row.worst_day_net_pnl)],['对冲失败',number(row.hedge_failure_count)],['单笔最大保证金',number(maxMargin)],['动作峰值',number(row.peak_order_actions_per_minute)+'/分']])]].map(([title,body])=>`<div class="panel"><strong>${title}</strong>${body}</div>`).join('');const days=daily.filter(x=>keyOf(x)===selectedKey).sort((a,b)=>String(a.trade_date).localeCompare(String(b.trade_date)));document.getElementById('daily-body').innerHTML=days.map(x=>`<tr class="${Number(x.net_pnl)<0||Number(x.hedge_failure_count)>0||Number(x.peak_order_actions_per_minute)>Number(threshold)?'negative':''}"><td>${x.trade_date}</td><td>${number(x.fill_count)}</td><td>${number(x.detector_event_fill_count)}</td><td>${number(x.normal_move_fill_count)}</td><td>${money(x.net_pnl)}</td><td>${number(x.hedge_failure_count)}</td><td>${number(x.peak_order_actions_per_minute)}</td></tr>`).join('')||'<tr><td colspan="7">无逐日数据</td></tr>';setupTradeFilters(current);renderTrades();document.getElementById('config').textContent=JSON.stringify(data.config,null,2);}
 function fillOptions(id,values,labels={}){const el=document.getElementById(id),old=el.value;el.innerHTML='<option value="">全部</option>'+[...new Set(values.filter(Boolean))].sort().map(x=>`<option value="${x}">${labels[x]||labelEvidence(x)}</option>`).join('');el.value=old;}
 function setupTradeFilters(current){fillOptions('evidence-filter',current.map(x=>x.fill_evidence));fillOptions('exit-filter',current.map(x=>x.exit_reason),exitLabels);fillOptions('status-filter',current.map(x=>x.status),statusLabels);['event-filter','direction-filter','evidence-filter','exit-filter','status-filter'].forEach(id=>document.getElementById(id).onchange=renderTrades)}
 function tradeContextKey(x){return keyOf(x)+'::'+x.trade_id}
@@ -654,6 +672,32 @@ function contextTable(rows,columns,target=false){const head=columns.map(([,label
 function openTradeDetail(trade){const context=tradeContexts[tradeContextKey(trade)];if(!context){alert(data.context_mode==='none'?'本次运行未生成成交详情（context_mode=none）。':'该笔交易未生成复盘上下文。');return}document.getElementById('modal-title').textContent=`${trade.instrument} · ${trade.scenario_id} · ${trade.trade_id}`;const phaseTimes=context.phase_times||{};const scenario=summary.find(x=>keyOf(x)===keyOf(trade))||{};const hold=trade.exit_key===null||trade.exit_key===undefined?'—':((Number(trade.exit_key)-Number(trade.fill_key))/1000).toFixed(1)+' 秒';const cards=[['目标/对冲合约',`${trade.target_contract} / ${trade.hedge_contract}`],['W / D / S',`${number(scenario.band_half_width_ticks)} / ${number(scenario.outer_quote_offset_ticks)} / ${number(scenario.reanchor_step_ticks)}`],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['参考合约对冲成交价',`${trade.hedge_contract || '—'}：${number(trade.hedge_entry_price)}`],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',`${money(trade.target_pnl)} / ${money(trade.hedge_pnl)}`],['净收益',money(trade.net_pnl)],['保证金',number(trade.gross_margin)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];document.getElementById('modal-cards').innerHTML=cards.map(([k,v])=>`<div class="card"><span>${k}</span><strong>${v}</strong></div>`).join('');let content=`<h2>目标合约 ${trade.target_contract}</h2><p class="muted">完整持仓窗口：${display(context.window.start_time)} 至 ${display(context.window.end_time)}（目标成交前 ${number(context.window.before_after_ms/1000)} 秒至退出后 ${number(context.window.before_after_ms/1000)} 秒）</p>${contextTable(context.target_rows,targetColumns,true)}`;Object.entries(context.contracts||{}).forEach(([code,part])=>{content+=`<h3 class="contract-title">${code} <span class="muted">${(part.roles||[]).join(' / ')}</span></h3>${contextTable(part.rows||[],referenceColumns)}`});document.getElementById('modal-content').innerHTML=content;document.getElementById('modal-raw').textContent=JSON.stringify(trade,null,2);document.getElementById('trade-modal').classList.remove('hidden')}
 function renderTrades(){let rows=trades.filter(x=>keyOf(x)===selectedKey);const event=document.getElementById('event-filter').value,direction=document.getElementById('direction-filter').value,evidence=document.getElementById('evidence-filter').value,exit=document.getElementById('exit-filter').value,status=document.getElementById('status-filter').value;rows=rows.filter(x=>(!event||x.event_label===event)&&(!direction||x.direction===direction)&&(!evidence||x.fill_evidence===evidence)&&(!exit||x.exit_reason===exit)&&(!status||x.status===status));document.getElementById('trade-count').textContent=`${rows.length} 笔`;document.getElementById('trade-body').innerHTML=rows.sort((a,b)=>Number(a.fill_key)-Number(b.fill_key)).map(x=>`<tr><td>${x.fill_time}</td><td>${x.direction==='long'?'买入目标':'卖出目标'}</td><td><span class="tag ${x.event_label==='normal_move_fill'?'warn':'good'}">${eventLabels[x.event_label]||x.event_label}</span></td><td>${labelEvidence(x.fill_evidence)}</td><td>${number(x.target_entry_price)}</td><td>${number(x.hedge_entry_price)}</td><td>${exitLabels[x.exit_reason]||x.exit_reason||'—'}<br><span class="muted">${statusLabels[x.status]||x.status}</span></td><td>${money(x.target_pnl)}</td><td>${money(x.hedge_pnl)}</td><td class="${Number(x.net_pnl)<0?'negative':'positive'}">${money(x.net_pnl)}</td><td>${money(x.unhedged_worst_mark_pnl)}</td><td>${money(x.hedged_worst_mark_pnl)}</td><td>${number(x.gross_margin)}</td><td><button class="detail-button" data-context="${tradeContextKey(x)}">查看详情</button></td></tr>`).join('')||'<tr><td colspan="14">当前筛选下无成交。</td></tr>';document.querySelectorAll('[data-context]').forEach(button=>button.onclick=()=>openTradeDetail(trades.find(x=>tradeContextKey(x)===button.dataset.context)));}
 function init(){overview();const instruments=[...new Set(summary.map(x=>x.instrument))].sort();document.getElementById('instrument-filter').innerHTML+instruments.map(x=>`<option value="${x}">${x}</option>`).join('');document.getElementById('instrument-filter').onchange=()=>{selectedKey='';renderScenarios();renderDetail()};document.getElementById('modal-close').onclick=()=>document.getElementById('trade-modal').classList.add('hidden');document.getElementById('trade-modal').onclick=e=>{if(e.target.id==='trade-modal')e.currentTarget.classList.add('hidden')};document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById('trade-modal').classList.add('hidden')});renderScenarios();renderDetail();}
+function flowTableEnhanced(events){
+const roleLabels={state:'状态',target_buy:'目标买单',target_sell:'目标卖单',hedge_entry:'对冲开仓',target_exit:'目标平仓',hedge_exit:'对冲平仓'};
+const actionLabels={state_change:'状态切换',submit:'提交',fill:'成交',quote_unavailable:'盘口不可用',capital_rejected:'资金限制'};
+const stateLabels={PAUSED:'暂停',FLAT_QUOTING:'双向挂单',REPLACE_PENDING:'重定锚换单',COOLDOWN:'冷却',LONG_PENDING_HEDGE:'多头待对冲',SHORT_PENDING_HEDGE:'空头待对冲',HEDGED_POSITION:'已对冲持仓',FLATTENING:'平仓中',EMERGENCY_FLATTEN:'紧急平仓'};
+const value=(row,key)=>{if(key==='role')return roleLabels[row[key]]||row[key]||'—';if(key==='action')return actionLabels[row[key]]||row[key]||'—';if(key==='side')return row[key]==='buy'?'买入':row[key]==='sell'?'卖出':'—';if(key==='from_state'||key==='to_state')return stateLabels[row[key]]||row[key]||'—';return display(row[key]);};
+const columns=[['display_time','时间'],['phase','阶段'],['event_type','类型'],['contract','合约'],['role','角色'],['side','方向'],['action','动作'],['price','价格'],['lots','手数'],['from_state','原状态'],['to_state','新状态'],['reason','原因'],['detail','说明']];
+const head=columns.map(([,label])=>`<th>${label}</th>`).join('');
+const body=(events||[]).map(row=>`<tr>${columns.map(([key])=>`<td>${value(row,key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${columns.length}">没有可用的关键流程记录。</td></tr>`;
+return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function openTradeDetail(trade){
+const context=tradeContexts[tradeContextKey(trade)];
+if(!context){alert(data.context_mode==='none'?'本次运行未生成成交详情（context_mode=none）。':'该笔交易未生成复盘上下文。');return}
+document.getElementById('modal-title').textContent=`${trade.instrument} · ${trade.scenario_id} · ${trade.trade_id}`;
+const phaseTimes=context.phase_times||{};
+const scenario=summary.find(x=>keyOf(x)===keyOf(trade))||{};
+const hold=trade.exit_key===null||trade.exit_key===undefined?'—':((Number(trade.exit_key)-Number(trade.fill_key))/1000).toFixed(1)+' 秒';
+const cards=[['目标/对冲合约',`${trade.target_contract} / ${trade.hedge_contract}`],['W / D / S',`${number(scenario.band_half_width_ticks)} / ${number(scenario.outer_quote_offset_ticks)} / ${number(scenario.reanchor_step_ticks)} tick`],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['参考合约对冲成交价',`${trade.hedge_contract || '—'}：${number(trade.hedge_entry_price)}`],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',`${money(trade.target_pnl)} / ${money(trade.hedge_pnl)}`],['净收益',money(trade.net_pnl)],['保证金',number(trade.gross_margin)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];
+document.getElementById('modal-cards').innerHTML=cards.map(([k,v])=>`<div class="card"><span>${k}</span><strong>${v}</strong></div>`).join('');
+const quoteColumns=[['关键时点','关键时点'],['display_time','更新时间'],['W_ticks','W（tick）'],['D_ticks','D（tick）'],['S_ticks','S（tick）'],['fair_price','合理价'],['fair_price_reliable','合理价可靠'],['grid_anchor','报价锚点'],['band_lower','合理价带下限'],['band_upper','合理价带上限'],['buy_limit','买入挂单价'],['sell_limit','卖出挂单价'],['quote_state','报价状态'],['quote_reason','状态原因'],['quote_active','报价有效'],['LastPrice','最新成交价'],['interval_vwap','区间成交均价'],['BidPrice1','买一价'],['AskPrice1','卖一价']];
+let content=`<h2>成交前 10 秒报价计算</h2>${contextTable(context.pre_fill_quote_rows||[],quoteColumns)}<h2>交易全流程</h2>${flowTableEnhanced(context.flow_events||[])}<h2>目标合约快照</h2><p class="muted">完整持仓窗口：${display(context.window.start_time)} 至 ${display(context.window.end_time)}（目标成交前 ${number(context.window.before_after_ms/1000)} 秒至退出后 ${number(context.window.before_after_ms/1000)} 秒）</p>${contextTable(context.target_rows,targetColumns,true)}`;
+Object.entries(context.contracts||{}).forEach(([code,part])=>{content+=`<h3 class="contract-title">${code} <span class="muted">${(part.roles||[]).join(' / ')}</span></h3>${contextTable(part.rows||[],referenceColumns)}`});
+document.getElementById('modal-content').innerHTML=content;
+document.getElementById('modal-raw').textContent=JSON.stringify(trade,null,2);
+document.getElementById('trade-modal').classList.remove('hidden');
+}
 init();
 </script>
 </body>

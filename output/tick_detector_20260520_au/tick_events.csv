@@ -1,2 +1,0 @@
-trade_date,commodity,contract,event_time,event_start_time,event_end_time,event_low_price,event_volume,event_depth_ticks,recovery_denominator_ticks,reference_contract_count,trigger_reasons,quote_recovery_10s_ticks,trade_recovery_10s_ticks,quote_recovery_30s_ticks,trade_recovery_30s_ticks,recovery_label
-20260520,AU,AU2606,2026-05-20 21:04:35.500,2026-05-20 21:04:35.500,2026-05-20 21:04:35.500,993.92,370.0,69.500000000005,56.99999999999932,5,visible_last_drop,66.0000000000025,66.0000000000025,66.0000000000025,66.0000000000025,fast_trade_recovery

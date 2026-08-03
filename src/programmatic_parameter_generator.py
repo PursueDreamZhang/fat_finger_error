@@ -33,7 +33,7 @@ class ParameterGeneratorConfig:
         "trade_recovered_3s", "quote_only_recovered_3s", "persistent_10s",
         "trade_recovered_10s", "quote_only_recovered_10s", "truncated",
     })
-    total_touch_quantiles: tuple[float, ...] = (0.50, 0.70, 0.85)
+    total_touch_quantiles: tuple[float, ...] = (0.70, 0.85)
     width_ratios: tuple[float, ...] = (0.40, 0.55)
     step_ratios: tuple[float, ...] = (0.50, 1.00)
 
@@ -133,7 +133,7 @@ def _is_eligible(row: pd.Series, config: ParameterGeneratorConfig) -> bool:
 
 
 def build_parameter_shapes(events: pd.DataFrame, config: ParameterGeneratorConfig | None = None) -> pd.DataFrame:
-    """每个合格合约生成 P50/P70/P85 与 W/S 组合的 T/W/D/S。"""
+    """每个合格合约生成默认 P70/P85 与 W/S 组合的 T/W/D/S。"""
     config = config or ParameterGeneratorConfig()
     events = _normalize_events(events)
     eligible = events.loc[events.apply(_is_eligible, axis=1, config=config)]

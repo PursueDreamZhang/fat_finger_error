@@ -1,7 +1,0 @@
-﻿detail_id,commodity,contract,trade_date,candidate_score,candidate_level,trigger_reasons,main_reference_contract
-A|A2503|2025-01-02,A,A2503,2025-01-02,32.0,low,结构失真,A2505
-A|A2503|2025-01-03,A,A2503,2025-01-03,44.0,low,结构失真,A2505
-A|A2503|2025-01-08,A,A2503,2025-01-08,44.0,low,结构失真,A2505
-A|A2505|2025-01-08,A,A2505,2025-01-08,40.0,low,结构失真,A2505
-A|A2503|2025-01-09,A,A2503,2025-01-09,60.0,medium,结构失真,A2505
-A|A2505|2025-01-09,A,A2505,2025-01-09,40.0,low,结构失真,A2505

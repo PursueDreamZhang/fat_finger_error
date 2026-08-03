@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "status": "blocked",
+  "scope": "tick_replay_and_programmatic_simulation",
+  "commodities": [
+    "AP",
+    "CF",
+    "CJ",
+    "CY",
+    "FG",
+    "MA",
+    "OI",
+    "PF",
+    "PK",
+    "PL",
+    "PR",
+    "PX",
+    "RM",
+    "RS",
+    "SA",
+    "SF",
+    "SH",
+    "SM",
+    "SR",
+    "TA",
+    "UR"
+  ],
+  "reason": "原始累计 Turnover/Volume 反推的单手成交价与 LastPrice 存在系统性不一致，interval_vwap 暂不具备可靠成交证据含义。",
+  "evidence_window": {
+    "start_date": "20260302",
+    "end_date": "20260529",
+    "basis": "每个交易日每个品种日线成交量最高的真实月度合约；单手增量样本审计"
+  },
+  "operator_note": "在数据质量修复或重新验证前，暂不运行这些品种的 tick 回放、程序化网格回放和相关成交统计。"
+}

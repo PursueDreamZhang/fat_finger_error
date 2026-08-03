@@ -13,6 +13,7 @@ from src.programmatic_grid import (
 )
 from src.programmatic_simulation import (
     _context_rows,
+    _render_programmatic_report,
     build_trade_contexts,
 )
 
@@ -24,7 +25,16 @@ def test_build_grid_scenarios_cartesian_product():
     })
     assert len(scenarios) == 4
     assert scenarios[0]["band_half_width_ticks"] == 5
+    assert scenarios[0]["quote_spread_multiple"] == 2
+    assert scenarios[0]["enable_hedge"] is True
     assert scenarios[-1]["cancel_ack_latency_ms"] == 200
+
+    no_hedge = build_grid_scenarios({
+        "base": {"enable_hedge": False},
+        "quote_shapes": [{"W": 5, "D": 6, "S": 7}],
+        "latency_profiles": [{}],
+    })
+    assert no_hedge[0]["enable_hedge"] is False
 
 
 def test_normalize_grid_requires_instruments_and_shapes():
@@ -38,6 +48,14 @@ def test_normalize_grid_requires_instruments_and_shapes():
     config = normalize_programmatic_grid_config(raw)
     assert config["thresholds"]["min_fills"] == 3
     assert config["context_mode"] == "all"
+    assert config["base"]["enable_hedge"] is True
+
+    raw["base"]["enable_hedge"] = False
+    assert normalize_programmatic_grid_config(raw)["base"]["enable_hedge"] is False
+    raw["base"]["enable_hedge"] = "bad"
+    with pytest.raises(ValueError, match="base.enable_hedge"):
+        normalize_programmatic_grid_config(raw)
+    raw["base"].pop("enable_hedge")
 
     raw["context_mode"] = "selected"
     raw["context_scenarios"] = ["NI::Q01-L01"]
@@ -118,7 +136,7 @@ def test_summarize_marks_insufficient_and_reports_win_rate():
 
 def test_grid_report_embeds_layered_trade_view_and_translated_risks():
     summary = pd.DataFrame([
-        {"scenario_id": "Q01-L01", "instrument": "NI2605", "band_half_width_ticks": 5, "outer_quote_offset_ticks": 5,
+        {"scenario_id": "Q01-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_ticks": 5, "outer_quote_offset_ticks": 5,
          "reanchor_step_ticks": 5, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
          "cancel_ack_latency_ms": 500, "new_order_ack_latency_ms": 500, "hedge_submit_latency_ms": 500, "max_hedge_wait_ms": 2000,
          "active_days": 1, "fill_count": 1, "detector_event_fill_count": 0, "normal_move_fill_count": 1,
@@ -127,7 +145,7 @@ def test_grid_report_embeds_layered_trade_view_and_translated_risks():
          "worst_day_net_pnl": -20, "daily_net_std": 0.0, "max_gross_margin": None,
          "peak_order_actions_per_minute": 21, "total_order_action_count": 30, "total_reprice_count": 2,
          "skipped_day_count": 0, "eligible": False, "selection_reason": "normal_move_fill_rate_too_high;order_action_limit_exceeded"},
-        {"scenario_id": "Q02-L01", "instrument": "NI2605", "band_half_width_ticks": 50, "outer_quote_offset_ticks": 50,
+        {"scenario_id": "Q02-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_ticks": 50, "outer_quote_offset_ticks": 50,
          "reanchor_step_ticks": 50, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
          "cancel_ack_latency_ms": 500, "new_order_ack_latency_ms": 500, "hedge_submit_latency_ms": 500, "max_hedge_wait_ms": 2000,
          "active_days": 1, "fill_count": 0, "detector_event_fill_count": 0, "normal_move_fill_count": 0,
@@ -154,9 +172,12 @@ def test_grid_report_embeds_layered_trade_view_and_translated_risks():
     assert "正常行情误成交过高" in html
     assert "候选事件成交" in html
     assert "查看详情" in html and "单笔模拟成交复盘" in html
+    assert "成交前 10 秒报价计算" in html
+    assert "交易全流程" in html
     assert "W / D / S" in html
     assert "目标成交价" in html
     assert "参考合约对冲成交价" in html
+    assert "对冲" in html
     assert "Q01-L01" in html and "Q02-L01" in html
 
 
@@ -189,6 +210,67 @@ def test_trade_context_keeps_full_holding_window_and_asof_references():
     assert context["contracts"]["NI2604"]["roles"] == ["合理价参考", "对冲合约"]
     assert context["contracts"]["NI2604"]["rows"][1]["关键时点"] == "目标成交、参考腿成交"
     assert context["contracts"]["NI2604"]["rows"][2]["关键时点"] == "退出"
+
+
+def test_trade_context_includes_quote_calculation_and_trade_flow():
+    target = pd.DataFrame({
+        "market_time_key": [0, 5000, 10000, 15000, 20000],
+        "display_time": ["09:00:00", "09:00:05", "09:00:10", "09:00:15", "09:00:20"],
+        "LastPrice": [100, 100, 99, 101, 102],
+        "fair_price": [100, 100, 100, 101, 102],
+        "interval_vwap": [100, 100, 99, 101, 102],
+        "tick_size": [1] * 5,
+    })
+    reference = pd.DataFrame({"market_time_key": [0], "display_time": ["09:00:00"], "LastPrice": [200]})
+    trades = pd.DataFrame([{
+        "instrument": "NI2605", "scenario_id": "Q01-L01", "trade_id": "t1", "fill_key": 10000,
+        "fill_time": "09:00:10", "hedge_entry_key": 15000, "hedge_entry_price": 201,
+        "exit_key": 20000, "exit_time": "09:00:20", "target_contract": "NI2605",
+        "hedge_contract": "NI2604", "direction": "long", "target_entry_price": 90,
+        "fill_evidence": "last_trade",
+    }])
+    transitions = pd.DataFrame([
+        {"market_time_key": 0, "display_time": "09:00:00", "from_state": "PAUSED", "to_state": "FLAT_QUOTING",
+         "reason": "last_price_recovered", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+        {"market_time_key": 15000, "display_time": "09:00:15", "from_state": "LONG_PENDING_HEDGE", "to_state": "HEDGED_POSITION",
+         "reason": "hedge_fill", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+        {"market_time_key": 20000, "display_time": "09:00:20", "from_state": "HEDGED_POSITION", "to_state": "FLATTENING",
+         "reason": "hedged_exit", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+    ])
+    orders = pd.DataFrame([
+        {"market_time_key": 10000, "display_time": "09:00:10", "parent_order_id": "", "contract": "NI2605", "role": "target_buy",
+         "side": "buy", "price": 90, "lots": 1, "event": "fill", "state": "FLAT_QUOTING", "detail": ""},
+        {"market_time_key": 10500, "display_time": "09:00:10.500", "parent_order_id": "t1", "contract": "NI2604", "role": "hedge_entry",
+         "side": "sell", "price": None, "lots": 1, "event": "submit", "state": "LONG_PENDING_HEDGE", "detail": ""},
+        {"market_time_key": 15000, "display_time": "09:00:15", "parent_order_id": "t1", "contract": "NI2604", "role": "hedge_entry",
+         "side": "sell", "price": 201, "lots": 1, "event": "fill", "state": "LONG_PENDING_HEDGE", "detail": ""},
+        {"market_time_key": 20000, "display_time": "09:00:20", "parent_order_id": "t1", "contract": "NI2605", "role": "target_exit",
+         "side": "sell", "price": 91, "lots": 1, "event": "fill", "state": "FLATTENING", "detail": ""},
+    ])
+    context = build_trade_contexts(
+        trades, target, {"NI2604": reference},
+        {"commodity": "NI", "band_half_width_ticks": 5, "outer_quote_offset_ticks": 5,
+         "reanchor_step_ticks": 2, "fair_reference_contracts": ["NI2604"], "hedge_contract": "NI2604"},
+        orders=orders, transitions=transitions,
+    )["NI2605::Q01-L01::t1"]
+    assert context["pre_fill_quote_rows"][0]["W_ticks"] == 5
+    assert context["pre_fill_quote_rows"][0]["D_ticks"] == 5
+    assert context["pre_fill_quote_rows"][0]["S_ticks"] == 2
+    assert context["pre_fill_quote_rows"][0]["grid_anchor"] == 100
+    assert context["pre_fill_quote_rows"][0]["buy_limit"] == 90
+    assert context["pre_fill_quote_rows"][-1]["关键时点"] == "目标成交"
+    order_actions = [row["action"] for row in context["flow_events"] if row["event_type"] == "订单事件"]
+    assert order_actions == ["fill", "submit", "fill", "fill"]
+    assert [row["phase"] for row in context["flow_events"] if row["reason"] == "hedge_fill"] == ["对冲"]
+
+
+def test_single_report_contains_enhanced_trade_detail_sections():
+    html = _render_programmatic_report({
+        "summary": pd.DataFrame([{"scope": "overall", "trade_date": "ALL"}]),
+        "trades": pd.DataFrame(), "trade_contexts": {}, "config": {}, "warnings": [],
+    })
+    assert "成交前 10 秒报价计算" in html
+    assert "交易全流程" in html
 
 
 def test_context_rows_keeps_duplicate_boundary_keys_with_sorted_slice():
