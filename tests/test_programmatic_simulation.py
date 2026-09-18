@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import zipfile
+
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
@@ -8,13 +10,16 @@ from src.programmatic_simulation import (
     DEFAULT_CONFIG,
     _DayReplay,
     _fill_evidence,
+    _load_event_rows,
     _quote_spread_ok,
     _simulate_programmatic_day_prepared,
+    _resolve_tick_day_path,
     build_programmatic_summary,
     build_grid,
     normalize_programmatic_simulation_config,
     simulate_programmatic_day,
 )
+from src.tick_detector.tick_io import iter_day_contract_files
 
 
 def _frame(contract: str, rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -68,9 +73,9 @@ def _config(**overrides: object) -> dict[str, object]:
             "default_commission_per_lot_per_side": 0,
             "target_lots": 1,
             "hedge_lots": 1,
-            "band_half_width_ticks": 10,
-            "outer_quote_offset_ticks": 10,
-            "reanchor_step_ticks": 10,
+            "band_half_width_pct": 10.0,
+            "outer_quote_offset_pct": 10.0,
+            "reanchor_step_pct": 10.0,
             "reanchor_confirm_ms": 500,
             "resume_confirm_ms": 0,
             "min_reprice_interval_ms": 0,
@@ -107,9 +112,52 @@ def _hedge(rows: list[dict[str, object]] | None = None) -> pd.DataFrame:
     )
 
 
+def test_monthly_zip_resolves_and_yields_only_the_requested_trade_date(tmp_path):
+    archive = tmp_path / "2025" / "202501.zip"
+    archive.parent.mkdir()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("202501/20250102/AP501_20250102.csv", "x")
+        zf.writestr("202501/20250103/AP501_20250103.csv", "x")
+
+    resolved = _resolve_tick_day_path(tmp_path, "20250102")
+
+    assert resolved == archive
+    assert [item.file_name for item in iter_day_contract_files(resolved, trade_date="20250102")] == [
+        "AP501_20250102.csv"
+    ]
+
+
+def test_event_loader_keeps_only_down_direction_and_validates_values(tmp_path):
+    path = tmp_path / "events.csv"
+    pd.DataFrame([
+        {"交易日": "20260302", "合约": "NI2605", "事件锚点结束序号": 10, "异常方向": "down"},
+        {"交易日": "20260302", "合约": "NI2605", "事件锚点结束序号": 20, "异常方向": "up"},
+    ]).to_csv(path, index=False)
+    assert _load_event_rows(str(path))["anchor_seq"].tolist() == [10]
+    pd.DataFrame([
+        {"交易日": "20260302", "合约": "NI2605", "事件锚点结束序号": 10, "异常方向": "bad"},
+    ]).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="异常方向"):
+        _load_event_rows(str(path))
+
+
+def test_monthly_zip_with_suffix_is_resolved(tmp_path):
+    archive = tmp_path / "2025" / "202508(补充缺少的rb).zip"
+    archive.parent.mkdir()
+    archive.touch()
+
+    assert _resolve_tick_day_path(tmp_path, "20250805") == archive
+
+
 def test_grid_and_normal_fill_then_programmatic_hedge_and_exit():
     assert build_grid(100, 1, _config()) == {
         "anchor": 100,
+        "W_pct": 10.0,
+        "D_pct": 10.0,
+        "S_pct": 10.0,
+        "W_ticks": 10,
+        "D_ticks": 10,
+        "S_ticks": 10,
         "band_lower": 90,
         "band_upper": 110,
         "buy_limit": 80,
@@ -140,6 +188,25 @@ def test_grid_and_normal_fill_then_programmatic_hedge_and_exit():
     assert "last_trade" in trade["fill_evidence"]
     assert "interval_vwap" in trade["fill_evidence"]
     assert "top_of_book" in trade["fill_evidence"]
+
+
+def test_grid_distances_scale_with_anchor_price():
+    config = _config(band_half_width_pct=1.0, outer_quote_offset_pct=1.0, reanchor_step_pct=1.0)
+    low = build_grid(100, 1, config)
+    high = build_grid(200, 1, config)
+    assert (low["W_ticks"], low["D_ticks"], low["S_ticks"]) == (1, 1, 1)
+    assert (high["W_ticks"], high["D_ticks"], high["S_ticks"]) == (2, 2, 2)
+    assert (low["buy_limit"], low["sell_limit"]) == (98, 102)
+    assert (high["buy_limit"], high["sell_limit"]) == (196, 204)
+
+
+def test_grid_rejects_invalid_anchor_tick_and_percentage():
+    config = _config(band_half_width_pct=1.0, outer_quote_offset_pct=1.0, reanchor_step_pct=1.0)
+    for anchor, tick_size in ((0, 1), (100, 0), (float("nan"), 1), (100, float("inf"))):
+        with pytest.raises(ValueError):
+            build_grid(anchor, tick_size, config)
+    with pytest.raises(ValueError, match="有限正数"):
+        build_grid(100, 1, {**config, "band_half_width_pct": float("inf")})
 
 
 def test_no_hedge_mode_skips_hedge_and_flattens_target_after_delay():
@@ -197,16 +264,29 @@ def test_quote_spread_multiple_defaults_to_two_and_rejects_nonpositive_values():
         "target_contract": "NI2605",
         "fair_reference_contracts": ["NI2604", "NI2609"],
         "hedge_contract": "NI2604",
+        "band_half_width_pct": 1.0,
+        "outer_quote_offset_pct": 1.0,
+        "reanchor_step_pct": 1.0,
     }
     assert normalize_programmatic_simulation_config(raw)["quote_spread_multiple"] == 2
     assert normalize_programmatic_simulation_config(raw)["enable_hedge"] is True
     assert normalize_programmatic_simulation_config({**raw, "enable_hedge": False})["enable_hedge"] is False
+    with pytest.raises(ValueError, match="显式提供百分比字段"):
+        normalize_programmatic_simulation_config({key: value for key, value in raw.items() if key != "reanchor_step_pct"})
     for value in (0, -1, "bad"):
         with pytest.raises(ValueError, match="quote_spread_multiple"):
             normalize_programmatic_simulation_config({**raw, "quote_spread_multiple": value})
     for value in (None, 0, 1, "bad"):
         with pytest.raises(ValueError, match="enable_hedge"):
             normalize_programmatic_simulation_config({**raw, "enable_hedge": value})
+    with pytest.raises(ValueError, match="旧字段"):
+        normalize_programmatic_simulation_config({**raw, "band_half_width_ticks": 10})
+    with pytest.raises(ValueError, match="旧字段"):
+        normalize_programmatic_simulation_config({**raw, "W": 10})
+    with pytest.raises(ValueError, match="必须小于 100"):
+        normalize_programmatic_simulation_config({**raw, "band_half_width_pct": 100})
+    with pytest.raises(ValueError, match="必须小于 100"):
+        normalize_programmatic_simulation_config({**raw, "band_half_width_pct": 60, "outer_quote_offset_pct": 40})
 
 
 def test_quote_spread_guard_cancels_existing_target_orders_before_fill():
@@ -338,8 +418,8 @@ def test_last_price_reanchors_after_confirmation_and_keeps_order_when_fair_is_sa
     assert result["trades"].empty
     completed = result["transitions"].loc[result["transitions"]["reason"] == "replace_complete"].iloc[-1]
     assert completed["grid_anchor"] == pytest.approx(90)
-    assert completed["buy_limit"] == pytest.approx(70)
-    assert completed["sell_limit"] == pytest.approx(110)
+    assert completed["buy_limit"] == pytest.approx(72)
+    assert completed["sell_limit"] == pytest.approx(108)
     assert "last_price_down_confirmed" in result["transitions"]["reason"].tolist()
 
 

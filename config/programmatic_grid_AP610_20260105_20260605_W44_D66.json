@@ -1,17 +1,14 @@
 {
-  "output_dir": "output/programmatic_grid_20260301_20260331_smoke",
+  "output_dir": "output/programmatic_grid_AP610_20260105_20260605_W44_D66",
+  "fair_cache_dir": "output/programmatic_grid_2026_available_unified_v2/AP610/fair_cache",
   "base": {
     "tick_data_root": "data/tick2026",
     "daily_data_root": "data/1d_futures",
-    "trade_date_start": "20260301",
-    "trade_date_end": "20260331",
-    "events_csv": "output/20260301_20260331-range/tick_candidate_events_annotated.csv",
-    "quality_exclusions": [
-      {
-        "trade_date": "20260309",
-        "commodity": "M"
-      }
-    ],
+    "trade_date_start": "20260105",
+    "trade_date_end": "20260605",
+    "events_csv": "output/programmatic_parameter_events_202601_202605_unified_provisional/tick_candidate_events_annotated.csv",
+    "quality_exclusions": [],
+    "detector_event_window_ms": 1000,
     "account_equity": 100000,
     "max_margin_ratio": 0.3,
     "default_margin_rate": 0.1,
@@ -19,9 +16,17 @@
       "NI": 0.1,
       "FU": 0.1
     },
+    "default_commission_per_lot_per_side": 0.0,
+    "commission_by_commodity": {},
     "target_lots": 1,
     "hedge_lots": 1,
+    "enable_hedge": true,
+    "quote_spread_multiple": 2,
+    "min_reprice_interval_ms": 1000,
     "max_order_actions_per_minute": 20,
+    "reanchor_confirm_ms": 1000,
+    "resume_confirm_ms": 2000,
+    "hedged_exit_delay_ms": 2000,
     "max_quote_age_ms": 3000,
     "max_fair_age_ms": 3000,
     "max_data_gap_ms": 3000,
@@ -31,38 +36,26 @@
   },
   "instruments": [
     {
-      "name": "NI2605",
-      "commodity": "NI",
-      "target_contract": "NI2605",
+      "name": "AP610",
+      "commodity": "AP",
+      "target_contract": "AP610",
       "fair_reference_contracts": [
-        "NI2604",
-        "NI2609",
-        "NI2607"
+        "AP605",
+        "AP612"
       ],
-      "hedge_contract": "NI2604"
-    },
-    {
-      "name": "FU2606",
-      "commodity": "FU",
-      "target_contract": "FU2606",
-      "fair_reference_contracts": [
-        "FU2605",
-        "FU2609",
-        "FU2607"
-      ],
-      "hedge_contract": "FU2605"
+      "hedge_contract": "AP605"
     }
   ],
   "quote_shapes": [
     {
-      "W_pct": 1.0,
-      "D_pct": 1.0,
-      "S_pct": 1.0
+      "W": 44,
+      "D": 66,
+      "S": 22
     },
     {
-      "W_pct": 5.0,
-      "D_pct": 5.0,
-      "S_pct": 5.0
+      "W": 44,
+      "D": 66,
+      "S": 44
     }
   ],
   "latency_profiles": [
@@ -79,6 +72,14 @@
       "resume_confirm_ms": 2000,
       "cancel_ack_latency_ms": 1000,
       "new_order_ack_latency_ms": 1000,
+      "hedge_submit_latency_ms": 1000,
+      "max_hedge_wait_ms": 3000
+    },
+    {
+      "reanchor_confirm_ms": 1000,
+      "resume_confirm_ms": 2000,
+      "cancel_ack_latency_ms": 1000,
+      "new_order_ack_latency_ms": 1000,
       "hedge_submit_latency_ms": 2000,
       "max_hedge_wait_ms": 5000
     }
@@ -88,5 +89,7 @@
   "max_normal_move_fill_rate": 0.25,
   "max_hedge_failure_rate": 0.1,
   "max_daily_loss": 500,
-  "max_peak_order_actions_per_minute": 20
+  "max_peak_order_actions_per_minute": 20,
+  "context_mode": "none",
+  "context_scenarios": []
 }

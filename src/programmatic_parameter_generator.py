@@ -19,8 +19,8 @@ REQUIRED_COLUMNS = {
 }
 RANGE_BINDING_COLUMNS = ["日线边界规则或数据版本", "日线边界清单SHA256", "源事件CSV SHA256"]
 RANGE_BINDING_HASH_COLUMNS = {"日线边界清单SHA256", "源事件CSV SHA256"}
-NUMERIC_COLUMNS = ["事件确认深度_跳", "有效参考合约数", "合理价不确定性_跳"]
-SHAPE_COLUMNS = ["commodity", "target_contract", "T_ticks", "W_ticks", "D_ticks", "S_ticks"]
+NUMERIC_COLUMNS = ["事件确认深度_跳", "事件确认深度_基点", "有效参考合约数", "合理价不确定性_跳"]
+SHAPE_COLUMNS = ["commodity", "target_contract", "T_pct", "W_pct", "D_pct", "S_pct"]
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,14 @@ def _normalize_events(events: pd.DataFrame) -> pd.DataFrame:
         normalized[column] = pd.to_numeric(normalized[column].replace("", pd.NA), errors="coerce")
     for column in ("品种", "合约", "回归标签", "数据质量标记", "日线边界判定"):
         normalized[column] = normalized[column].astype(str).str.strip()
+    if "异常方向" not in normalized:
+        normalized["异常方向"] = "down"
+    else:
+        direction = normalized["异常方向"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
+        invalid = ~direction.isin(("down", "up"))
+        if invalid.any():
+            raise ValueError("异常方向只允许 down 或 up")
+        normalized["异常方向"] = direction
     normalized["确认深度来源"] = normalized["确认深度来源"].astype("string").str.strip()
     return normalized
 
@@ -111,13 +119,11 @@ def load_events(path: str | Path) -> pd.DataFrame:
     return _normalize_events(pd.read_csv(path, keep_default_na=False))
 
 
-def _ceil_tick(value: float) -> int:
-    return max(1, math.ceil(float(value) - 1e-12))
-
-
 def _is_eligible(row: pd.Series, config: ParameterGeneratorConfig) -> bool:
     source = row["确认深度来源"]
     return (
+        row["异常方向"] == "down"
+        and
         row["数据质量标记"] in config.allowed_data_quality
         and row["日线边界判定"] in config.allowed_daily_boundary
         and row["回归标签"] in config.allowed_regression_labels
@@ -127,6 +133,9 @@ def _is_eligible(row: pd.Series, config: ParameterGeneratorConfig) -> bool:
         and row["合理价不确定性_跳"] <= float(config.max_fair_uncertainty_ticks)
         and pd.notna(row["事件确认深度_跳"])
         and row["事件确认深度_跳"] > 0
+        and pd.notna(row["事件确认深度_基点"])
+        and math.isfinite(float(row["事件确认深度_基点"]))
+        and 0 < float(row["事件确认深度_基点"]) < 10000
         and pd.notna(source)
         and bool(str(source).strip())
     )
@@ -137,20 +146,21 @@ def build_parameter_shapes(events: pd.DataFrame, config: ParameterGeneratorConfi
     config = config or ParameterGeneratorConfig()
     events = _normalize_events(events)
     eligible = events.loc[events.apply(_is_eligible, axis=1, config=config)]
-    shapes: list[dict[str, int | str]] = []
-    seen: set[tuple[str, str, int, int, int, int]] = set()
+    shapes: list[dict[str, float | str]] = []
+    seen: set[tuple[str, str, float, float, float, float]] = set()
     for (commodity, contract), group in eligible.groupby(["品种", "合约"], sort=True):
         if len(group) < config.min_eligible_samples:
             continue
+        depth_pct = group["事件确认深度_基点"].astype(float) / 100.0
         for quantile in config.total_touch_quantiles:
-            total = _ceil_tick(group["事件确认深度_跳"].quantile(float(quantile)))
+            total = float(depth_pct.quantile(float(quantile)))
             for width_ratio in config.width_ratios:
-                width = _ceil_tick(total * float(width_ratio))
+                width = total * float(width_ratio)
                 distance = total - width
                 if distance <= 0:
                     continue
                 for step_ratio in config.step_ratios:
-                    step = _ceil_tick(width * float(step_ratio))
+                    step = width * float(step_ratio)
                     key = (commodity, contract, total, width, distance, step)
                     if key in seen:
                         continue
@@ -158,10 +168,10 @@ def build_parameter_shapes(events: pd.DataFrame, config: ParameterGeneratorConfi
                     shapes.append({
                         "commodity": commodity,
                         "target_contract": contract,
-                        "T_ticks": total,
-                        "W_ticks": width,
-                        "D_ticks": distance,
-                        "S_ticks": step,
+                        "T_pct": total,
+                        "W_pct": width,
+                        "D_pct": distance,
+                        "S_pct": step,
                     })
     return pd.DataFrame(shapes, columns=SHAPE_COLUMNS)
 

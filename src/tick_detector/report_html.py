@@ -12,11 +12,14 @@ EVENT_SUMMARY_COLUMNS = [
     ("event_anchor_time", "事件时间"),
     ("commodity", "品种"),
     ("contract", "合约"),
+    ("event_direction", "异常方向"),
     ("trigger_reasons", "触发原因"),
     ("fair_price", "合理价"),
     ("interval_vwap_anchor", "区间成交均价"),
     ("last_down_ticks", "末笔向下偏离_跳"),
+    ("last_up_ticks", "末笔向上偏离_跳"),
     ("vwap_down_ticks", "区间均价向下偏离_跳"),
+    ("vwap_up_ticks", "区间均价向上偏离_跳"),
     ("onset_ticks", "突发偏离_跳"),
     ("event_depth_ticks", "事件确认深度_跳"),
     ("event_depth_bps", "事件确认深度_基点"),
@@ -24,6 +27,9 @@ EVENT_SUMMARY_COLUMNS = [
     ("recovery_label", "回归标签"),
     ("visible_recovered_seconds", "可见末笔恢复确认秒数"),
     ("interval_recovered_seconds", "区间均价恢复确认秒数"),
+    ("quote_recovered_seconds", "买一恢复确认秒数"),
+    ("ask_recovered_seconds", "卖一恢复确认秒数"),
+    ("notional_excess", "名义成交额超额"),
 ]
 
 # 目标检测明细表中文表头
@@ -47,7 +53,13 @@ TARGET_DETAIL_COLUMNS = [
     ("interval_vwap", "区间成交均价"),
     ("fair_price", "合理价"),
     ("last_down_ticks", "末笔向下偏离_跳"),
+    ("last_up_ticks", "末笔向上偏离_跳"),
     ("vwap_down_ticks", "区间均价向下偏离_跳"),
+    ("vwap_up_ticks", "区间均价向上偏离_跳"),
+    ("combined_vwap_down_ticks", "一秒合并均价向下偏离_跳"),
+    ("combined_vwap_up_ticks", "一秒合并均价向上偏离_跳"),
+    ("down_trigger_reasons", "向下触发原因"),
+    ("up_trigger_reasons", "向上触发原因"),
     ("__is_candidate_anchor", "是否候选锚点"),
 ]
 
@@ -153,9 +165,10 @@ def _render_event_summary_table(events_df: pd.DataFrame) -> str:
     for _, row in events_df.iterrows():
         event_id = _format_dom_id(str(row.get("event_id") or ""))
         modal_href = f"#modal-{event_id}"
-        cells = "".join(f"<td>{_format_value(row.get(key))}</td>" for key, _ in EVENT_SUMMARY_COLUMNS)
+        cells = "".join(f"<td>{_format_event_value(key, row.get(key))}</td>" for key, _ in EVENT_SUMMARY_COLUMNS)
+        direction_class = " direction-up" if str(row.get("event_direction", "down")) == "up" else ""
         body_rows.append(
-            f"<tr class='event-summary-row' id='summary-{event_id}'>"
+            f"<tr class='event-summary-row{direction_class}' id='summary-{event_id}'>"
             + cells
             + f"<td class='detail-cell'><a class='detail-link' href='{modal_href}'>查看详情</a></td>"
             + "</tr>"
@@ -171,6 +184,7 @@ def _render_event_section(event: dict[str, object], payload: dict[str, object]) 
 
     summary_cards = [
         ("事件时间", _format_value(event.get("event_anchor_time"))),
+        ("异常方向", _translate_direction(event.get("event_direction"))),
         ("触发原因", _translate_reasons(event.get("trigger_reasons"))),
         ("合理价", _format_value(event.get("fair_price"))),
         ("区间成交均价", _format_value(event.get("interval_vwap_anchor"))),
@@ -235,13 +249,23 @@ def _render_peer_blocks(peer_windows: dict[str, list]) -> str:
 
 def _translate_reasons(value: object) -> str:
     mapping = {
-        "visible_execution_drop": "可见末笔成交异常",
-        "interval_execution_drop": "区间均价异常",
+        "visible_execution_drop": "可见末笔向下异常",
+        "interval_execution_drop": "区间均价向下异常",
+        "visible_execution_spike": "可见末笔向上异常",
+        "interval_execution_spike": "区间均价向上异常",
     }
     text = str(value or "")
     if not text:
         return ""
     return "、".join(mapping.get(p, p) for p in text.split(","))
+
+
+def _translate_direction(value: object) -> str:
+    return {"down": "向下", "up": "向上"}.get(str(value or "down"), str(value or ""))
+
+
+def _format_event_value(key: str, value: object) -> str:
+    return _translate_direction(value) if key == "event_direction" else _format_value(value)
 
 
 def _translate_recovery(value: object) -> str:
@@ -295,6 +319,8 @@ def _style_block() -> str:
       .page-note { color: #4b5563; }
       .event-section { margin-top: 28px; padding: 20px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px; }
       .event-summary-row:hover td { background: #e0f2fe; }
+      .event-summary-row.direction-up td { background: #fef3c7; }
+      .event-summary-row.direction-up:hover td { background: #fde68a; }
       .detail-cell { white-space: nowrap; }
       .detail-link { display: inline-block; background: #0f766e; color: #ffffff; border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 600; text-decoration: none; }
       .detail-link:hover { background: #115e59; }

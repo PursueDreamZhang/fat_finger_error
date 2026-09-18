@@ -10,6 +10,7 @@ from src.tick_detector.event_detection import (
     MAX_CONFIRMATION_GAP_SECONDS,
     attach_recovery_metrics,
     detect_candidate_ticks,
+    extract_candidate_ticks,
     merge_candidates,
 )
 from src.tick_detector.tick_io import MAX_DATA_GAP_SECONDS
@@ -121,6 +122,14 @@ def test_visible_drop_blocked_when_last_below_threshold():
     assert out.empty
 
 
+def test_visible_execution_spike_triggers_independently():
+    marked = detect_candidate_ticks(_df([_row(10000, last_price=101.0)]), return_marked=True)
+    out = extract_candidate_ticks(marked)
+    assert out["event_direction"].tolist() == ["up"]
+    assert "visible_execution_spike" in out["trigger_reasons"].iloc[0]
+    assert out["last_up_ticks"].iloc[0] == pytest.approx(50.0)
+
+
 # ---------------------------------------------------------------------------
 # interval_execution_drop（区间均价分支需 1 秒确认）
 # ---------------------------------------------------------------------------
@@ -154,6 +163,24 @@ def test_interval_drop_blocked_when_1s_combined_normal():
     df_marked = detect_candidate_ticks(df, return_marked=True)
     flags = str(df_marked["data_quality_flags"].iloc[0])
     assert "counter_lag_suspect" in flags
+
+
+def test_interval_execution_spike_needs_and_passes_1s_confirmation():
+    out = detect_candidate_ticks(_df([
+        _row(10000, last_price=100.0, interval_vwap=101.0, delta_volume=10, delta_turnover=1010000),
+        _row(11000, last_price=100.0, interval_vwap=101.0, delta_volume=10, delta_turnover=1010000),
+    ]))
+    assert out["event_direction"].tolist() == ["up"]
+    assert "interval_execution_spike" in out["trigger_reasons"].iloc[0]
+
+
+def test_same_time_key_keeps_opposite_direction_candidates_separate():
+    out = detect_candidate_ticks(_df([
+        _row(10000, last_price=99.0, interval_vwap=101.0, delta_volume=10, delta_turnover=1010000),
+        _row(11000, last_price=100.0, interval_vwap=101.0, delta_volume=10, delta_turnover=1010000),
+    ]))
+    same_key = out.loc[out["market_time_key"] == 10000]
+    assert same_key["event_direction"].tolist() == ["down", "up"]
 
 
 def test_interval_drop_blocked_when_confirmation_window_incomplete():
@@ -425,6 +452,19 @@ def test_merge_candidates_copies_anchor_fields_and_dedups_reasons():
     assert isinstance(event["__peer_bases"], dict)
 
 
+def test_merge_candidates_does_not_merge_opposite_directions():
+    down = _candidate(10000, depth=50.0)
+    up = _candidate(10000, depth=60.0, last_price=101.0, trigger_reasons="visible_execution_spike")
+    up.update({
+        "event_direction": "up", "last_up_ticks": 50.0, "vwap_up_ticks": 0.0,
+        "combined_vwap_up_ticks": float("nan"),
+    })
+    candidates = _df([down, up])
+    events = merge_candidates(candidates, candidates)
+    assert events["event_direction"].tolist() == ["down", "up"]
+    assert events["event_depth_ticks"].tolist() == [50.0, 60.0]
+
+
 # ---------------------------------------------------------------------------
 # 恢复：冻结 basis 的同通道回归
 # ---------------------------------------------------------------------------
@@ -494,6 +534,28 @@ def test_recovery_marks_trade_recovered_3s_when_channels_return():
     assert row["recovery_label"] == "trade_recovered_3s"
     assert pd.notna(row["visible_recovered_seconds"])
     assert pd.notna(row["interval_recovered_seconds"])
+
+
+def test_up_recovery_uses_ask_and_keeps_bid_recovery_empty():
+    anchor = _candidate(10000, depth=50.0, last_price=101.0, trigger_reasons="visible_execution_spike")
+    anchor.update({"event_direction": "up", "last_up_ticks": 50.0, "vwap_up_ticks": 0.0})
+    enriched = _enriched_frame([
+        _row(7000, last_price=100.0, delta_volume=10),
+        _row(8000, last_price=100.0, delta_volume=10),
+        _row(9000, last_price=100.0, delta_volume=10),
+        anchor,
+    ] + [
+        _row(mk, last_price=100.0, delta_volume=10, bid_price=99.0, ask_price=100.0)
+        for mk in range(11000, 21000, 1000)
+    ])
+    candidates = enriched.loc[enriched["market_time_key"] == 10000].copy()
+    events = merge_candidates(candidates, enriched)
+    peer_keys = list(range(10000, 21000, 1000))
+    peers = {code: _peer_frame(code, [_peer_row(mk, 100.0) for mk in peer_keys]) for code in ("AU2608", "AU2610")}
+    recovered = attach_recovery_metrics(events, enriched, peers, {"tick_size": 0.02, "contract_multiplier": 1000})
+    row = recovered.iloc[0]
+    assert pd.isna(row["quote_recovered_seconds"])
+    assert row["ask_recovered_seconds"] == pytest.approx(1.0)
 
 
 def test_recovery_marks_truncated_on_data_gap():

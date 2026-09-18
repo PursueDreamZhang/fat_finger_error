@@ -1,25 +1,28 @@
 {
-  "output_dir": "output/programmatic_grid_stage0_20260302",
+  "output_dir": "output/programmatic_grid_AP510_202506_202510_W31_D46_S31",
+  "fair_cache_dir": "output/programmatic_grid_AP510_202506_202510_W44_D66_S44/fair_cache",
   "base": {
-    "tick_data_root": "data/tick2026",
+    "tick_data_root": "data/tick2011-2025",
     "daily_data_root": "data/1d_futures",
-    "trade_date_start": "20260302",
-    "trade_date_end": "20260302",
-    "events_csv": "output/20260301_20260331-range/tick_candidate_events_annotated.csv",
-    "quality_exclusions": [
-      {
-        "trade_date": "20260309",
-        "commodity": "M"
-      }
-    ],
+    "trade_date_start": "20250601",
+    "trade_date_end": "20251031",
+    "events_csv": "",
+    "quality_exclusions": [],
+    "detector_event_window_ms": 1000,
     "account_equity": 100000,
     "max_margin_ratio": 0.3,
     "default_margin_rate": 0.1,
     "margin_rate_by_commodity": {
-      "NI": 0.1
+      "AP": 0.1
+    },
+    "default_commission_per_lot_per_side": 0,
+    "commission_by_commodity": {
+      "AP": 0
     },
     "target_lots": 1,
     "hedge_lots": 1,
+    "enable_hedge": false,
+    "quote_spread_multiple": 2,
     "max_order_actions_per_minute": 20,
     "max_quote_age_ms": 3000,
     "max_fair_age_ms": 3000,
@@ -30,22 +33,21 @@
   },
   "instruments": [
     {
-      "name": "NI2605",
-      "commodity": "NI",
-      "target_contract": "NI2605",
+      "name": "AP510",
+      "commodity": "AP",
+      "target_contract": "AP510",
       "fair_reference_contracts": [
-        "NI2604",
-        "NI2609",
-        "NI2607"
+        "AP511",
+        "AP512"
       ],
-      "hedge_contract": "NI2604"
+      "hedge_contract": "AP511"
     }
   ],
   "quote_shapes": [
     {
-      "W_pct": 2.0,
-      "D_pct": 2.0,
-      "S_pct": 1.0
+      "W": 31,
+      "D": 46,
+      "S": 31
     }
   ],
   "latency_profiles": [
@@ -54,8 +56,8 @@
       "resume_confirm_ms": 2000,
       "cancel_ack_latency_ms": 1000,
       "new_order_ack_latency_ms": 1000,
-      "hedge_submit_latency_ms": 1000,
-      "max_hedge_wait_ms": 3000
+      "hedge_submit_latency_ms": 2000,
+      "max_hedge_wait_ms": 5000
     }
   ],
   "min_fills": 3,
@@ -63,5 +65,6 @@
   "max_normal_move_fill_rate": 0.25,
   "max_hedge_failure_rate": 0.1,
   "max_daily_loss": 500,
-  "max_peak_order_actions_per_minute": 20
+  "max_peak_order_actions_per_minute": 20,
+  "context_mode": "none"
 }

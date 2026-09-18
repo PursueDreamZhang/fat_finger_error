@@ -65,18 +65,22 @@ def test_range_binding_metadata_must_be_consistent_and_sha256_shaped():
 
 def test_each_contract_gets_p70_p85_and_w_s_combinations():
     shapes = build_parameter_shapes(_events())
-    assert list(shapes.columns) == ["commodity", "target_contract", "T_ticks", "W_ticks", "D_ticks", "S_ticks"]
+    assert list(shapes.columns) == ["commodity", "target_contract", "T_pct", "W_pct", "D_pct", "S_pct"]
     assert len(shapes) == 8
-    assert set(shapes["T_ticks"]) == {7, 8}
-    assert (shapes["T_ticks"] == shapes["W_ticks"] + shapes["D_ticks"]).all()
+    assert shapes["T_pct"].between(0, 100).all()
+    assert (shapes["T_pct"] - shapes["W_pct"] - shapes["D_pct"]).abs().lt(1e-12).all()
 
 
-def test_onset_and_bps_do_not_change_the_shapes():
+def test_onset_does_not_change_shapes_but_missing_bps_is_excluded():
     left = build_parameter_shapes(_events())
     changed = _events()
     changed["突发偏离_跳"] = 999.0
-    changed["事件确认深度_基点"] = ""
     pd.testing.assert_frame_equal(left, build_parameter_shapes(changed))
+    changed["事件确认深度_基点"] = ""
+    assert build_parameter_shapes(changed).empty
+    changed = _events()
+    changed["事件确认深度_基点"] = 10000
+    assert build_parameter_shapes(changed).empty
 
 
 def test_invalid_events_are_filtered_and_insufficient_contracts_are_omitted():
@@ -110,14 +114,14 @@ def test_json_config_can_limit_combination_dimensions(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"total_touch_quantiles": [0.5], "width_ratios": [0.4], "step_ratios": [0.5]}), encoding="utf-8")
     shapes = build_parameter_shapes(_events(), load_parameter_generator_config(path))
-    assert shapes.iloc[0]["T_ticks"] == 6
+    assert shapes.iloc[0]["T_pct"] == pytest.approx(0.0055)
     assert len(shapes) == 1
 
 
 def test_explicit_three_quantiles_restores_p50():
     shapes = build_parameter_shapes(_events(), ParameterGeneratorConfig(total_touch_quantiles=(0.5, 0.7, 0.85)))
 
-    assert set(shapes["T_ticks"]) == {6, 7, 8}
+    assert set(shapes["T_pct"].round(6)) == {0.0055, 0.0069, 0.00795}
     assert len(shapes) == 12
 
 
@@ -126,7 +130,19 @@ def test_default_threshold_is_four_eligible_events():
     assert build_parameter_shapes(_events(rows=3)).empty
 
 
+def test_directional_input_only_generates_low_side_down_parameters():
+    events = _events()
+    events["异常方向"] = ["down"] * 4 + ["up"] * 4
+    pd.testing.assert_frame_equal(build_parameter_shapes(events), build_parameter_shapes(_events(rows=4)))
+    events["异常方向"] = "up"
+    assert build_parameter_shapes(events).empty
+    events = _events()
+    events["异常方向"] = "sideways"
+    with pytest.raises(ValueError, match="异常方向"):
+        build_parameter_shapes(events)
+
+
 def test_output_is_one_csv_with_only_contract_and_shape_columns(tmp_path):
     path = write_parameter_shapes(build_parameter_shapes(_events()), tmp_path)
     assert path.name == "parameter_shapes.csv"
-    assert list(pd.read_csv(path).columns) == ["commodity", "target_contract", "T_ticks", "W_ticks", "D_ticks", "S_ticks"]
+    assert list(pd.read_csv(path).columns) == ["commodity", "target_contract", "T_pct", "W_pct", "D_pct", "S_pct"]

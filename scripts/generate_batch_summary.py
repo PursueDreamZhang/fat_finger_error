@@ -23,8 +23,9 @@ STATUS_LABELS = {
     "missing": "状态缺失",
 }
 EVENT_COLUMNS = [
-    "品种", "合约", "事件时间", "触发原因", "合理价", "区间成交均价",
-    "末笔向下偏离_跳", "区间均价向下偏离_跳", "回归标签",
+    "品种", "合约", "事件时间", "异常方向", "触发原因", "合理价", "区间成交均价",
+    "末笔向下偏离_跳", "区间均价向下偏离_跳",
+    "末笔向上偏离_跳", "区间均价向上偏离_跳", "回归标签",
 ]
 
 
@@ -83,6 +84,10 @@ def _base_status(commodity: str, status: str) -> dict[str, Any]:
         "finished_at": None,
         "elapsed_seconds": None,
         "event_count": 0,
+        "down_event_count": 0,
+        "up_event_count": 0,
+        "max_down_ticks": None,
+        "max_up_ticks": None,
         "contract_count": 0,
         "output_dir": commodity,
         "event_replay_html": f"{commodity}/event_replay_{commodity}.html",
@@ -174,6 +179,7 @@ def print_progress(output_dir: Path) -> None:
 def finalize_batch(output_dir: Path, finished_at: str, elapsed_seconds: float) -> dict[str, Any]:
     manifest, statuses = load_batch(output_dir)
     event_parts = []
+    empty_event_columns: list[str] = []
     for status in statuses:
         events, warning = _read_events(output_dir / str(status["events_csv"]))
         if warning and not status.get("error"):
@@ -181,7 +187,9 @@ def finalize_batch(output_dir: Path, finished_at: str, elapsed_seconds: float) -
         if not events.empty:
             event_parts.append(events)
             _attach_event_stats(status, events)
-    combined = pd.concat(event_parts, ignore_index=True) if event_parts else pd.DataFrame()
+        elif len(events.columns):
+            empty_event_columns.extend(column for column in events.columns if column not in empty_event_columns)
+    combined = pd.concat(event_parts, ignore_index=True) if event_parts else pd.DataFrame(columns=empty_event_columns)
     combined.to_csv(output_dir / "tick_candidate_events.csv", index=False)
     counts = progress_counts(statuses)
     payload = {
@@ -192,6 +200,8 @@ def finalize_batch(output_dir: Path, finished_at: str, elapsed_seconds: float) -
             **counts,
             "unfinished": counts["total"] - counts["completed"],
             "event_count": len(combined),
+            "down_event_count": int(_event_direction(combined).eq("down").sum()),
+            "up_event_count": int(_event_direction(combined).eq("up").sum()),
         },
         "commodities": statuses,
     }
@@ -208,13 +218,28 @@ def _attach_event_stats(status: dict[str, Any], events: pd.DataFrame) -> None:
     status["first_event_time"] = _series_edge(events, "事件时间", "min")
     status["last_event_time"] = _series_edge(events, "事件时间", "max")
     status["trigger_reasons"] = _join_values(events, "触发原因")
-    candidates = []
-    for column in ("末笔向下偏离_跳", "区间均价向下偏离_跳"):
-        if column in events:
-            values = pd.to_numeric(events[column], errors="coerce")
-            if values.notna().any():
-                candidates.append(float(values.max()))
-    status["max_down_ticks"] = max(candidates) if candidates else None
+    direction = _event_direction(events)
+    down_events = events.loc[direction.eq("down")]
+    up_events = events.loc[direction.eq("up")]
+    status["down_event_count"] = len(down_events)
+    status["up_event_count"] = len(up_events)
+    status["max_down_ticks"] = _max_ticks(down_events, ("末笔向下偏离_跳", "区间均价向下偏离_跳"))
+    status["max_up_ticks"] = _max_ticks(up_events, ("末笔向上偏离_跳", "区间均价向上偏离_跳"))
+
+
+def _event_direction(events: pd.DataFrame) -> pd.Series:
+    if "异常方向" not in events:
+        return pd.Series("down", index=events.index, dtype=str)
+    return events["异常方向"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
+
+
+def _max_ticks(events: pd.DataFrame, columns: tuple[str, ...]) -> float | None:
+    values = [
+        pd.to_numeric(events[column], errors="coerce").max()
+        for column in columns if column in events
+    ]
+    values = [float(value) for value in values if pd.notna(value)]
+    return max(values) if values else None
 
 
 def _series_edge(frame: pd.DataFrame, column: str, method: str) -> str | None:
@@ -270,6 +295,8 @@ def _overview(payload: dict[str, Any], counts: dict[str, Any]) -> str:
         ("失败", counts.get("failed", 0)),
         ("未完成", counts.get("unfinished", 0)),
         ("候选事件", counts.get("event_count", 0)),
+        ("向下事件", counts.get("down_event_count", 0)),
+        ("向上事件", counts.get("up_event_count", 0)),
     ]
     return "<div class='cards'>" + "".join(
         f"<div class='card'><span>{_h(label)}</span><strong>{_h(value)}</strong></div>" for label, value in cards
@@ -279,9 +306,9 @@ def _overview(payload: dict[str, Any], counts: dict[str, Any]) -> str:
 def _commodity_table(statuses: list[dict[str, Any]], empty: str = "无品种状态。", hit_table: bool = False) -> str:
     if not statuses:
         return f"<div class='empty'>{_h(empty)}</div>"
-    headers = ["品种", "状态", "事件数", "命中合约数"]
+    headers = ["品种", "状态", "事件数", "向下", "向上", "命中合约数"]
     if hit_table:
-        headers += ["最早事件", "最晚事件", "触发原因", "最大偏离_跳"]
+        headers += ["最早事件", "最晚事件", "触发原因", "最大向下偏离_跳", "最大向上偏离_跳"]
     headers += ["耗时", "复盘", "CSV", "日志"]
     rows = []
     for status in statuses:
@@ -289,12 +316,14 @@ def _commodity_table(statuses: list[dict[str, Any]], empty: str = "无品种状�
             _h(status.get("commodity")),
             _status_badge(str(status.get("status"))),
             _h(status.get("event_count", 0)),
+            _h(status.get("down_event_count", 0)),
+            _h(status.get("up_event_count", 0)),
             _h(status.get("contract_count", 0)),
         ]
         if hit_table:
             cells += [
                 _h(status.get("first_event_time")), _h(status.get("last_event_time")),
-                _h(status.get("trigger_reasons")), _h(status.get("max_down_ticks")),
+                _h(status.get("trigger_reasons")), _h(status.get("max_down_ticks")), _h(status.get("max_up_ticks")),
             ]
         cells += [
             _h(_duration(status.get("elapsed_seconds"))),

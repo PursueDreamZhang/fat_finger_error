@@ -4,6 +4,7 @@ import pytest
 import src.programmatic_grid as programmatic_grid
 from src.programmatic_grid import (
     GRID_SUMMARY_COLUMNS,
+    _load_daily_main_contract,
     _render_grid_report,
     build_grid_scenarios,
     normalize_programmatic_grid_config,
@@ -20,18 +21,18 @@ from src.programmatic_simulation import (
 
 def test_build_grid_scenarios_cartesian_product():
     scenarios = build_grid_scenarios({
-        "quote_shapes": [{"W": 5, "D": 6, "S": 7}, {"W": 10, "D": 11, "S": 12}],
+        "quote_shapes": [{"W_pct": 5, "D_pct": 6, "S_pct": 7}, {"W_pct": 10, "D_pct": 11, "S_pct": 12}],
         "latency_profiles": [{"cancel_ack_latency_ms": 100}, {"cancel_ack_latency_ms": 200}],
     })
     assert len(scenarios) == 4
-    assert scenarios[0]["band_half_width_ticks"] == 5
+    assert scenarios[0]["band_half_width_pct"] == 5
     assert scenarios[0]["quote_spread_multiple"] == 2
     assert scenarios[0]["enable_hedge"] is True
     assert scenarios[-1]["cancel_ack_latency_ms"] == 200
 
     no_hedge = build_grid_scenarios({
         "base": {"enable_hedge": False},
-        "quote_shapes": [{"W": 5, "D": 6, "S": 7}],
+        "quote_shapes": [{"W_pct": 5, "D_pct": 6, "S_pct": 7}],
         "latency_profiles": [{}],
     })
     assert no_hedge[0]["enable_hedge"] is False
@@ -42,7 +43,7 @@ def test_normalize_grid_requires_instruments_and_shapes():
         "output_dir": "tmp/grid",
         "base": {"trade_date_start": "20260301", "trade_date_end": "20260302"},
         "instruments": [{"name": "NI", "commodity": "NI", "target_contract": "NI2605", "fair_reference_contracts": ["NI2604", "NI2609"], "hedge_contract": "NI2604"}],
-        "quote_shapes": [{"W": 5, "D": 5, "S": 5}],
+        "quote_shapes": [{"W_pct": 5, "D_pct": 5, "S_pct": 5}],
         "latency_profiles": [{}],
     }
     config = normalize_programmatic_grid_config(raw)
@@ -64,6 +65,10 @@ def test_normalize_grid_requires_instruments_and_shapes():
     raw["context_scenarios"] = ["missing::Q01-L01"]
     with pytest.raises(ValueError, match="不存在组合"):
         normalize_programmatic_grid_config(raw)
+    raw["context_scenarios"] = []
+    raw["quote_shapes"] = [{"W": 5, "D": 5, "S": 5}]
+    with pytest.raises(ValueError, match="旧字段"):
+        normalize_programmatic_grid_config(raw)
 
 
 def test_grid_normalizes_each_scenario_once_before_date_loop(monkeypatch):
@@ -71,7 +76,7 @@ def test_grid_normalizes_each_scenario_once_before_date_loop(monkeypatch):
         "output_dir": "tmp/grid",
         "base": {"trade_date_start": "20260301", "trade_date_end": "20260302"},
         "instruments": [{"name": "NI", "commodity": "NI", "target_contract": "NI2605", "fair_reference_contracts": ["NI2604", "NI2609"], "hedge_contract": "NI2604"}],
-        "quote_shapes": [{"W": 5, "D": 5, "S": 5}, {"W": 10, "D": 10, "S": 10}],
+        "quote_shapes": [{"W_pct": 5, "D_pct": 5, "S_pct": 5}, {"W_pct": 10, "D_pct": 10, "S_pct": 10}],
         "latency_profiles": [{}],
     }
     original = programmatic_grid.normalize_programmatic_simulation_config
@@ -101,6 +106,31 @@ def test_stable_sorted_frame_keeps_duplicate_time_order():
     assert result["LastPrice"].tolist() == [10, 11, 20]
 
 
+def test_daily_main_contract_ranks_top_five_and_ignores_continuous(tmp_path):
+    day_dir = tmp_path / "2026"
+    day_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"code": "AP.ZCE", "vol": 9999},
+            {"code": "AP2604.ZCE", "vol": 100},
+            {"code": "AP2605.ZCE", "vol": 200},
+            {"code": "AP2610.ZCE", "vol": 150},
+            {"code": "AP2603.ZCE", "vol": 90},
+            {"code": "AP2601.ZCE", "vol": 80},
+            {"code": "AP2611.ZCE", "vol": 70},
+            {"code": "AP2612.ZCE", "vol": 60},
+            {"code": "A2605.DCE", "vol": 200},
+            {"code": "AG2605.SHFE", "vol": 999999},
+            {"code": "RB2605.SHFE", "vol": 999999},
+        ]
+    ).to_parquet(day_dir / "20260303.parquet")
+
+    assert _load_daily_main_contract("AP", "20260303", str(tmp_path)) == (
+        "AP2605(200)、AP2610(150)、AP2604(100)、AP2603(90)、AP2601(80)"
+    )
+    assert _load_daily_main_contract("A", "20260303", str(tmp_path)) == "A2605(200)"
+
+
 def test_fair_cache_requires_complete_enriched_frame(tmp_path):
     config = {"fair_cache_dir": str(tmp_path)}
     frame = pd.DataFrame({
@@ -116,7 +146,7 @@ def test_fair_cache_requires_complete_enriched_frame(tmp_path):
 
 
 def test_summarize_marks_insufficient_and_reports_win_rate():
-    scenario = build_grid_scenarios({"quote_shapes": [{"W": 5, "D": 5, "S": 5}], "latency_profiles": [{}]})[0]
+    scenario = build_grid_scenarios({"quote_shapes": [{"W_pct": 5, "D_pct": 5, "S_pct": 5}], "latency_profiles": [{}]})[0]
     daily = pd.DataFrame([
         {"scenario_id": scenario["scenario_id"], "instrument": "NI", "trade_date": "20260301", "fill_count": 2,
          "detector_event_fill_count": 2, "normal_move_fill_count": 0, "fill_during_replace_count": 0,
@@ -136,8 +166,8 @@ def test_summarize_marks_insufficient_and_reports_win_rate():
 
 def test_grid_report_embeds_layered_trade_view_and_translated_risks():
     summary = pd.DataFrame([
-        {"scenario_id": "Q01-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_ticks": 5, "outer_quote_offset_ticks": 5,
-         "reanchor_step_ticks": 5, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
+        {"scenario_id": "Q01-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_pct": 5, "outer_quote_offset_pct": 5,
+         "reanchor_step_pct": 5, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
          "cancel_ack_latency_ms": 500, "new_order_ack_latency_ms": 500, "hedge_submit_latency_ms": 500, "max_hedge_wait_ms": 2000,
          "active_days": 1, "fill_count": 1, "detector_event_fill_count": 0, "normal_move_fill_count": 1,
          "normal_move_fill_rate": 1.0, "fill_during_replace_count": 0, "closed_count": 1, "hedge_failure_count": 0,
@@ -145,8 +175,8 @@ def test_grid_report_embeds_layered_trade_view_and_translated_risks():
          "worst_day_net_pnl": -20, "daily_net_std": 0.0, "max_gross_margin": None,
          "peak_order_actions_per_minute": 21, "total_order_action_count": 30, "total_reprice_count": 2,
          "skipped_day_count": 0, "eligible": False, "selection_reason": "normal_move_fill_rate_too_high;order_action_limit_exceeded"},
-        {"scenario_id": "Q02-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_ticks": 50, "outer_quote_offset_ticks": 50,
-         "reanchor_step_ticks": 50, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
+        {"scenario_id": "Q02-L01", "instrument": "NI2605", "enable_hedge": True, "band_half_width_pct": 50, "outer_quote_offset_pct": 50,
+         "reanchor_step_pct": 50, "reanchor_confirm_ms": 1000, "resume_confirm_ms": 2000, "fair_invalid_confirm_ms": 1000,
          "cancel_ack_latency_ms": 500, "new_order_ack_latency_ms": 500, "hedge_submit_latency_ms": 500, "max_hedge_wait_ms": 2000,
          "active_days": 1, "fill_count": 0, "detector_event_fill_count": 0, "normal_move_fill_count": 0,
          "normal_move_fill_rate": None, "fill_during_replace_count": 0, "closed_count": 0, "hedge_failure_count": 0,
@@ -155,9 +185,14 @@ def test_grid_report_embeds_layered_trade_view_and_translated_risks():
          "peak_order_actions_per_minute": 2, "total_order_action_count": 8, "total_reprice_count": 0,
          "skipped_day_count": 0, "eligible": False, "selection_reason": "insufficient_fills"},
     ])
-    daily = pd.DataFrame([{"scenario_id": "Q01-L01", "instrument": "NI2605", "trade_date": "20260302", "fill_count": 1,
-                           "detector_event_fill_count": 0, "normal_move_fill_count": 1, "net_pnl": -20,
-                           "hedge_failure_count": 0, "peak_order_actions_per_minute": 21, "skipped": False}])
+    daily = pd.DataFrame([
+        {"scenario_id": "Q01-L01", "instrument": "NI2605", "trade_date": "20260301", "main_contract": "NI2602(2,000)", "fill_count": 0,
+         "detector_event_fill_count": 0, "normal_move_fill_count": 0, "net_pnl": 0,
+         "hedge_failure_count": 0, "peak_order_actions_per_minute": 0, "skipped": False},
+        {"scenario_id": "Q01-L01", "instrument": "NI2605", "trade_date": "20260302", "main_contract": "NI2605(1,000)", "fill_count": 1,
+         "detector_event_fill_count": 0, "normal_move_fill_count": 1, "net_pnl": -20,
+         "hedge_failure_count": 0, "peak_order_actions_per_minute": 21, "skipped": False},
+    ])
     trades = pd.DataFrame([{"trade_id": "t1", "scenario_id": "Q01-L01", "instrument": "NI2605", "fill_time": "21:00:01",
                             "fill_key": 1, "direction": "long", "event_label": "normal_move_fill", "fill_evidence": "last_trade",
                             "target_entry_price": 100, "hedge_entry_price": 99, "exit_reason": "reversion_exit", "status": "closed",
@@ -172,6 +207,9 @@ def test_grid_report_embeds_layered_trade_view_and_translated_risks():
     assert "正常行情误成交过高" in html
     assert "候选事件成交" in html
     assert "查看详情" in html and "单笔模拟成交复盘" in html
+    assert "当前主要合约" in html and "main_contract" in html
+    assert "NI2605(1,000)" in html
+    assert "Number(x.fill_count)>0" in html
     assert "成交前 10 秒报价计算" in html
     assert "交易全流程" in html
     assert "W / D / S" in html
@@ -231,11 +269,14 @@ def test_trade_context_includes_quote_calculation_and_trade_flow():
     }])
     transitions = pd.DataFrame([
         {"market_time_key": 0, "display_time": "09:00:00", "from_state": "PAUSED", "to_state": "FLAT_QUOTING",
-         "reason": "last_price_recovered", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+         "reason": "last_price_recovered", "grid_anchor": 100, "W_pct": 5, "D_pct": 5, "S_pct": 2,
+         "W_ticks": 5, "D_ticks": 5, "S_ticks": 2, "buy_limit": 90, "sell_limit": 110},
         {"market_time_key": 15000, "display_time": "09:00:15", "from_state": "LONG_PENDING_HEDGE", "to_state": "HEDGED_POSITION",
-         "reason": "hedge_fill", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+         "reason": "hedge_fill", "grid_anchor": 100, "W_pct": 5, "D_pct": 5, "S_pct": 2,
+         "W_ticks": 5, "D_ticks": 5, "S_ticks": 2, "buy_limit": 90, "sell_limit": 110},
         {"market_time_key": 20000, "display_time": "09:00:20", "from_state": "HEDGED_POSITION", "to_state": "FLATTENING",
-         "reason": "hedged_exit", "grid_anchor": 100, "buy_limit": 90, "sell_limit": 110},
+         "reason": "hedged_exit", "grid_anchor": 100, "W_pct": 5, "D_pct": 5, "S_pct": 2,
+         "W_ticks": 5, "D_ticks": 5, "S_ticks": 2, "buy_limit": 90, "sell_limit": 110},
     ])
     orders = pd.DataFrame([
         {"market_time_key": 10000, "display_time": "09:00:10", "parent_order_id": "", "contract": "NI2605", "role": "target_buy",
@@ -249,8 +290,8 @@ def test_trade_context_includes_quote_calculation_and_trade_flow():
     ])
     context = build_trade_contexts(
         trades, target, {"NI2604": reference},
-        {"commodity": "NI", "band_half_width_ticks": 5, "outer_quote_offset_ticks": 5,
-         "reanchor_step_ticks": 2, "fair_reference_contracts": ["NI2604"], "hedge_contract": "NI2604"},
+        {"commodity": "NI", "band_half_width_pct": 5, "outer_quote_offset_pct": 5,
+         "reanchor_step_pct": 2, "fair_reference_contracts": ["NI2604"], "hedge_contract": "NI2604"},
         orders=orders, transitions=transitions,
     )["NI2605::Q01-L01::t1"]
     assert context["pre_fill_quote_rows"][0]["W_ticks"] == 5

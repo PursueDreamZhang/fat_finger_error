@@ -52,7 +52,7 @@
 |`output_dir`|本次 CSV、JSON、HTML 输出目录|
 |`base`|所有品种共用的回放、风险和数据路径参数|
 |`instruments`|目标、参考与对冲合约定义|
-|`quote_shapes`|网格形状，包含 `W`、`D`、`S`|
+|`quote_shapes`|网格形状，包含 `W_pct`、`D_pct`、`S_pct`；数值单位为百分比|
 |`latency_profiles`|撤单、新单、对冲与确认延迟档位|
 |`context_mode`|详情生成模式，默认 `all`|
 |`context_scenarios`|`selected` 模式下需要详情的 `instrument::scenario_id` 列表|
@@ -60,15 +60,17 @@
 |`base.quote_spread_multiple`|买卖一价差保护倍数 N，默认 `2`；单配置入口使用顶层同名字段|
 |`base.enable_hedge`|是否执行参考合约对冲，默认 `true`；单配置入口使用顶层同名字段|
 
-`W/D/S` 的含义：
+`W_pct/D_pct/S_pct` 的含义：
 
-- `W`：诊断用合理价带半宽（tick）；
-- `D`：带外被动报价距离（tick）；
-- `S`：`LastPrice` 持续越过诊断价带边界后触发重定锚的步长（tick）。
+- `W_pct`：诊断用合理价带半宽（百分比）；
+- `D_pct`：带外被动报价距离（百分比）；
+- `S_pct`：`LastPrice` 持续越过诊断价带边界后触发重定锚的步长（百分比）。
 
-例如 `LastPrice` 为 100、`W=10`、`D=10`、`S=10` 时，报价为 80 买入和 120 卖出。`LastPrice` 确认跌破诊断价带下沿 90 后，会按延迟与撤改单规则重新锚定；这不是每个快照追价。fair 仍计算并展示，但不参与挂单锚点或重定锚决策。
+三个百分比字段必须显式提供，并且是有限正数；`W_pct + D_pct` 必须小于 100，`S_pct` 必须小于 100。旧的 `W/D/S` 或固定 tick 字段不会自动换算，需重新生成百分比参数。
 
-目标腿开仓还会检查盘口价差：`T = W + D` 必须严格大于 `N × (卖一 - 买一) / tick_size`。默认 `N=2`，可通过 `quote_spread_multiple` 调整。买一或卖一无效时采取保守策略，撤销目标挂单并暂停，盘口价差恢复后再重新报价。该保护只作用于目标腿开仓，不改变对冲和平仓成交口径。
+例如 `LastPrice` 为 100、`W_pct=10`、`D_pct=10`、`S_pct=10` 时，报价为 80 买入和 120 卖出；锚点为 200 时会按同样百分比重新换算实际跳数。每次初始报价或重定锚都换算一次，同一轮挂单期间固定。`LastPrice` 确认跌破诊断价带下沿后，会按延迟与撤改单规则重新锚定；这不是每个快照追价。fair 仍计算并展示，但不参与挂单锚点或重定锚决策。
+
+目标腿开仓还会检查盘口价差：按当前网格锚点换算得到的实际 `T_ticks = W_ticks + D_ticks` 必须严格大于 `N × (卖一 - 买一) / tick_size`。默认 `N=2`，可通过 `quote_spread_multiple` 调整。买一或卖一无效时采取保守策略，撤销目标挂单并暂停，盘口价差恢复后再重新报价。该保护只作用于目标腿开仓，不改变对冲和平仓成交口径。
 
 `enable_hedge=false` 时，目标腿成交后不提交对冲，也不执行对冲腿保证金检查；沿用 `hedged_exit_delay_ms` 延迟后只平目标腿，退出原因记为 `no_hedge_exit`。该模式仍保留对冲合约配置和参考快照结构，但对冲成交价、对冲盈亏为空。它不是持仓到收盘模式，目标腿到期无法按可执行盘口平仓时仍按收盘未平处理。
 
@@ -116,7 +118,7 @@
 
 HTML 默认优先展示有成交组合。点击组合后可按候选事件/正常行情、方向、成交证据、退出原因和状态筛选单笔交易；点击“查看详情”可查看：
 
-- **成交前 10 秒报价计算**：每个目标快照的 `W/D/S`（tick）、fair（诊断）、报价锚点、合理价带、买卖挂单价、盘口和报价状态；锚点与挂单价按当时最近的状态转换取值，实际锚点和重定锚信号来自 `LastPrice`。
+- **成交前 10 秒报价计算**：每个目标快照的 W/D/S 百分比及按当时锚点换算的 tick 数、fair（诊断）、报价锚点、合理价带、买卖挂单价、盘口和报价状态；锚点与挂单价按当时最近的状态转换取值，实际锚点和重定锚信号来自 `LastPrice`。
 - **交易全流程**：目标成交、对冲提交/成交、平仓提交/成交、关键状态切换及失败原因，按时间排序；这部分只展示关键交易生命周期，不展开全部 ACK/撤单日志。
 - **原始快照表**：保留目标、参考和对冲合约的目标成交前后窗口，并在关键时点标记成交、对冲和退出。
 
@@ -225,7 +227,7 @@ wait
 |`fair_reference_contracts`|构建无未来 fair 的参考合约（≥2 个）|
 |`hedge_contract`|对冲腿，必须属于上面的参考集|
 |`enable_hedge`|是否执行对冲，默认 `true`；设为 `false` 时延迟后只平目标腿|
-|`band_half_width_ticks` / `outer_quote_offset_ticks` / `reanchor_step_ticks`|即 W / D / S|
+|`band_half_width_pct` / `outer_quote_offset_pct` / `reanchor_step_pct`|即 W / D / S，百分比单位（`1.0` 表示 1%）|
 |`hedged_exit_delay_ms`|对冲成交后延迟多久平两腿|
 |`max_order_actions_per_minute`|每分钟报撤动作上限|
 |`events_csv`|候选事件 CSV，仅用于成交后归因标签，可为空|
@@ -243,3 +245,22 @@ wait
 |`run_config.json`|本次生效配置|
 
 与网格回放的区别仅在：单配置不扫参数网格、不写 `programmatic_grid_trade_contexts.json`（复盘直接内嵌 report），输出文件名为 `programmatic_*`（网格为 `programmatic_grid_*`）。
+
+## 11. 自动选参驱动的 Mid 距离带回放
+
+`docs/mid_analyzer/auto_parameter_selector.py` 生成的 `auto_parameters.csv` 可以直接作为回放参数。该入口按合约和方向分别读取 `TargetDistance`、`MinDistance`、`MaxDistance`，每秒用目标合约 `Mid=(BidPrice1+AskPrice1)/2` 检查挂单；距离落在闭区间内保持原单，越界只撤对应方向。成交采用订单生效后的 `LastPrice` 触达且 `delta_volume > 0` 的整手快照假设。
+
+本模式固定不对冲；成交后按 `--hold-seconds` 指定的时间，用目标合约可执行一档盘口平仓。5 秒是上游模型的统计观察窗口，不会被回放器当作平仓时间。
+
+如需覆盖手续费、手数、资金、订单生效延迟或 tick/乘数，可额外传入一个只包含执行假设的 JSON：`--config execution_overrides.json`。该 JSON 禁止 W/D/S、fair 参考和对冲字段；省略时使用代码默认值。
+
+```bash
+./venv/bin/python scripts/run_programmatic_simulation.py \
+  --parameters output/auto_result/auto_parameters.csv \
+  --input data/tick2026 \
+  --start-date 20260401 --end-date 20260430 \
+  --hold-seconds 2 \
+  --output-dir output/mid_distance_202604
+```
+
+该模式的输出包括 `parameters_used.csv`、`replay_summary.csv`、`replay_trades.csv`、`quote_checks.csv`、`replay_skipped_days.csv` 和 `replay_index.html`；每个合约另有同名检查、订单与交易文件。`SafeDistance`、事件数量和 `FollowRatio` 只作为参数快照保留，不在成交时再次筛选；参数 CSV 中 `NO_QUALIFIED_DISTANCE` 的方向不会挂单。

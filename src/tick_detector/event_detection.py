@@ -23,7 +23,7 @@ def detect_candidate_ticks(
     *,
     return_marked: bool = False,
 ) -> pd.DataFrame:
-    """双成交通道检测：visible_execution_drop / interval_execution_drop + onset。
+    """双向成交通道检测；默认返回方向候选，return_marked 返回完整标记帧。
 
     设计文档 §6（有向成交信号）、§7（突发性与候选触发）、§7.1（区间均价计数器确认）。
     时间契约统一使用 market_time_key（毫秒）。
@@ -36,9 +36,11 @@ def detect_candidate_ticks(
     tick_size = float(out["tick_size"].iloc[0]) if "tick_size" in out.columns else 0.02
     multiplier = int(out["contract_multiplier"].iloc[0]) if "contract_multiplier" in out.columns else 1000
 
-    # 预计算每行的有向偏离
+    # 预计算每行的双向偏离。旧的 down 字段保持原公式，保证历史消费者兼容。
     last_down_ticks = np.full(n, np.nan)
+    last_up_ticks = np.full(n, np.nan)
     vwap_down_ticks = np.full(n, np.nan)
+    vwap_up_ticks = np.full(n, np.nan)
     for i in range(n):
         fp = out.at[i, "fair_price"]
         if not np.isfinite(fp) or fp <= 0:
@@ -46,18 +48,27 @@ def detect_candidate_ticks(
         last = out.at[i, "LastPrice"]
         if np.isfinite(last) and last > 0:
             last_down_ticks[i] = (fp - last) / tick_size
+            last_up_ticks[i] = (last - fp) / tick_size
         vwap = out.at[i, "interval_vwap"]
         if np.isfinite(vwap) and vwap > 0:
             vwap_down_ticks[i] = (fp - vwap) / tick_size
+            vwap_up_ticks[i] = (vwap - fp) / tick_size
     out["last_down_ticks"] = last_down_ticks
+    out["last_up_ticks"] = last_up_ticks
     out["vwap_down_ticks"] = vwap_down_ticks
+    out["vwap_up_ticks"] = vwap_up_ticks
 
-    candidate_mask = np.zeros(n, dtype=bool)
-    trigger_reasons: list[list[str]] = [[] for _ in range(n)]
+    candidate_down_depth = np.full(n, np.nan)
+    candidate_up_depth = np.full(n, np.nan)
+    down_reasons: list[list[str]] = [[] for _ in range(n)]
+    up_reasons: list[list[str]] = [[] for _ in range(n)]
     combined_vwap_1s = np.full(n, np.nan)
     combined_vwap_down_ticks = np.full(n, np.nan)
+    combined_vwap_up_ticks = np.full(n, np.nan)
     confirmation_end = np.full(n, np.nan)
     data_quality = [list(out.at[i, "data_quality_flags"].split(",")) if str(out.at[i, "data_quality_flags"]) else [] for i in range(n)]
+    onset_down_ticks = np.full(n, np.nan)
+    onset_up_ticks = np.full(n, np.nan)
 
     for i in range(n):
         # 基础阻断条件（设计文档 §4.4）
@@ -78,71 +89,114 @@ def detect_candidate_ticks(
         last_thr = float(out.at[i, "last_threshold_ticks"])
         vwap_thr = float(out.at[i, "vwap_threshold_ticks"])
 
-        # visible_execution_drop：末笔低于 fair_price 超阈值（独立判断，不等待未来数据）
-        visible_hit = (
-            np.isfinite(last_down_ticks[i])
-            and last_down_ticks[i] >= last_thr
+        down_interval_hit = False
+        up_interval_hit = False
+        needs_confirmation = (
+            (np.isfinite(vwap_down_ticks[i]) and vwap_down_ticks[i] >= vwap_thr)
+            or (np.isfinite(vwap_up_ticks[i]) and vwap_up_ticks[i] >= vwap_thr)
         )
-
-        # interval_execution_drop：区间均价超阈值 + 完整 1s 合并仍异常
-        interval_hit = False
-        if np.isfinite(vwap_down_ticks[i]) and vwap_down_ticks[i] >= vwap_thr:
+        # 区间均价两个方向共用同一段完整 1 秒确认窗。
+        if needs_confirmation:
             conf = _compute_1s_confirmation(out, i, tick_size, multiplier)
             combined_vwap_1s[i] = conf["combined_vwap"]
             confirmation_end[i] = conf["confirmation_end_key"]
             if conf["block_reason"]:
                 data_quality[i].append(conf["block_reason"])
             if conf["window_complete"]:
-                cv = (float(out.at[i, "fair_price"]) - conf["combined_vwap"]) / tick_size
-                combined_vwap_down_ticks[i] = cv
-                if cv >= vwap_thr:
-                    interval_hit = True
-                else:
-                    # 单帧异常但合并后正常
+                down_cv = (float(out.at[i, "fair_price"]) - conf["combined_vwap"]) / tick_size
+                up_cv = (conf["combined_vwap"] - float(out.at[i, "fair_price"])) / tick_size
+                combined_vwap_down_ticks[i] = down_cv
+                combined_vwap_up_ticks[i] = up_cv
+                down_interval_hit = (
+                    np.isfinite(vwap_down_ticks[i])
+                    and vwap_down_ticks[i] >= vwap_thr
+                    and down_cv >= vwap_thr
+                )
+                up_interval_hit = (
+                    np.isfinite(vwap_up_ticks[i])
+                    and vwap_up_ticks[i] >= vwap_thr
+                    and up_cv >= vwap_thr
+                )
+                if (
+                    (np.isfinite(vwap_down_ticks[i]) and vwap_down_ticks[i] >= vwap_thr and not down_interval_hit)
+                    or (np.isfinite(vwap_up_ticks[i]) and vwap_up_ticks[i] >= vwap_thr and not up_interval_hit)
+                ):
+                    # 单帧异常但合并后正常。
                     data_quality[i].append("counter_lag_suspect")
-            # 窗口不完整时区间分支不触发（counter_sync_unconfirmed 由 block_reason 记录）
-
-        if not (visible_hit or interval_hit):
-            continue
-
-        # onset：过去 3 秒深度
-        pre_depth, onset_ok, onset_val = _check_onset(
-            out, i, last_down_ticks, vwap_down_ticks, tick_size
-        )
-        if not onset_ok:
-            data_quality[i].append("onset_data_gap")
-            continue
-
-        onset_ticks = max(0.0, max(last_down_ticks[i] if visible_hit else 0.0,
-                                   _cand_depth(i, last_down_ticks, vwap_down_ticks, interval_hit))
-                           - max(0.0, pre_depth))
-        sigma = float(out.at[i, "execution_depth_robust_sigma"]) if np.isfinite(out.at[i, "execution_depth_robust_sigma"]) else 1.0
-        onset_threshold = max(ONSET_MIN_TICKS, ONSET_K_SIGMA * sigma)
-        if onset_ticks < onset_threshold:
-            continue
-
-        candidate_mask[i] = True
-        out.at[i, "candidate_execution_depth"] = max(
-            last_down_ticks[i] if visible_hit else -math.inf,
-            (combined_vwap_down_ticks[i] if np.isfinite(combined_vwap_down_ticks[i]) else vwap_down_ticks[i]) if interval_hit else -math.inf,
-        )
-        out.at[i, "onset_ticks"] = onset_ticks
-        out.at[i, "combined_vwap_1s"] = combined_vwap_1s[i]
-        out.at[i, "combined_vwap_down_ticks"] = combined_vwap_down_ticks[i]
-        out.at[i, "interval_confirmation_end_time"] = confirmation_end[i]
-        if visible_hit:
-            trigger_reasons[i].append("visible_execution_drop")
-        if interval_hit:
-            trigger_reasons[i].append("interval_execution_drop")
+        for direction, last_depths, vwap_depths, combined_depths, interval_hit, visible_reason, interval_reason, candidate_depths, onset_depths, reasons in (
+            ("down", last_down_ticks, vwap_down_ticks, combined_vwap_down_ticks, down_interval_hit, "visible_execution_drop", "interval_execution_drop", candidate_down_depth, onset_down_ticks, down_reasons),
+            ("up", last_up_ticks, vwap_up_ticks, combined_vwap_up_ticks, up_interval_hit, "visible_execution_spike", "interval_execution_spike", candidate_up_depth, onset_up_ticks, up_reasons),
+        ):
+            visible_hit = np.isfinite(last_depths[i]) and last_depths[i] >= last_thr
+            if not (visible_hit or interval_hit):
+                continue
+            pre_depth, onset_ok, _ = _check_onset(out, i, last_depths, vwap_depths)
+            if not onset_ok:
+                data_quality[i].append("onset_data_gap")
+                continue
+            depth = max(
+                last_depths[i] if visible_hit else -math.inf,
+                (combined_depths[i] if np.isfinite(combined_depths[i]) else vwap_depths[i]) if interval_hit else -math.inf,
+            )
+            onset = max(0.0, depth - max(0.0, pre_depth))
+            sigma = float(out.at[i, "execution_depth_robust_sigma"]) if np.isfinite(out.at[i, "execution_depth_robust_sigma"]) else 1.0
+            if onset < max(ONSET_MIN_TICKS, ONSET_K_SIGMA * sigma):
+                continue
+            candidate_depths[i] = depth
+            onset_depths[i] = onset
+            if visible_hit:
+                reasons[i].append(visible_reason)
+            if interval_hit:
+                reasons[i].append(interval_reason)
 
     # 写回 data_quality_flags
     out["data_quality_flags"] = [",".join(set(f for f in flags if f)) for flags in data_quality]
-    out["trigger_reasons"] = [",".join(r) for r in trigger_reasons]
-    out.loc[~candidate_mask, "candidate_execution_depth"] = np.nan
+    out["candidate_down_execution_depth"] = candidate_down_depth
+    out["candidate_up_execution_depth"] = candidate_up_depth
+    out["down_trigger_reasons"] = [",".join(reasons) for reasons in down_reasons]
+    out["up_trigger_reasons"] = [",".join(reasons) for reasons in up_reasons]
+    out["onset_down_ticks"] = onset_down_ticks
+    out["onset_up_ticks"] = onset_up_ticks
+    out["combined_vwap_1s"] = combined_vwap_1s
+    out["combined_vwap_down_ticks"] = combined_vwap_down_ticks
+    out["combined_vwap_up_ticks"] = combined_vwap_up_ticks
+    out["interval_confirmation_end_time"] = confirmation_end
+    out["candidate_execution_depth"] = np.fmax(candidate_down_depth, candidate_up_depth)
+    out["onset_ticks"] = np.fmax(onset_down_ticks, onset_up_ticks)
+    out.loc[~np.isfinite(out["candidate_execution_depth"]), "onset_ticks"] = np.nan
+    out["trigger_reasons"] = [
+        ",".join(down_reasons[i] + up_reasons[i]) for i in range(n)
+    ]
 
     if return_marked:
         return out
-    return out.loc[candidate_mask].copy()
+    return extract_candidate_ticks(out)
+
+
+def extract_candidate_ticks(marked: pd.DataFrame) -> pd.DataFrame:
+    """从完整标记帧展开方向候选；同一时间键可产生两个方向事件。"""
+    parts: list[pd.DataFrame] = []
+    for direction, depth_col, onset_col, reasons_col in (
+        ("down", "candidate_down_execution_depth", "onset_down_ticks", "down_trigger_reasons"),
+        ("up", "candidate_up_execution_depth", "onset_up_ticks", "up_trigger_reasons"),
+    ):
+        if depth_col not in marked.columns:
+            continue
+        part = marked.loc[marked[depth_col].notna()].copy()
+        if part.empty:
+            continue
+        part["event_direction"] = direction
+        part["candidate_execution_depth"] = part[depth_col]
+        part["onset_ticks"] = part[onset_col]
+        part["trigger_reasons"] = part[reasons_col]
+        parts.append(part)
+    if not parts:
+        out = marked.iloc[0:0].copy()
+        out["event_direction"] = pd.Series(dtype=str)
+        return out
+    return pd.concat(parts, ignore_index=True).sort_values(
+        ["market_time_key", "event_direction"], kind="stable"
+    ).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +282,8 @@ def _compute_1s_confirmation(
 def _check_onset(
     df: pd.DataFrame,
     i: int,
-    last_down_ticks: np.ndarray,
-    vwap_down_ticks: np.ndarray,
-    tick_size: float,
+    last_depth_ticks: np.ndarray,
+    vwap_depth_ticks: np.ndarray,
 ) -> tuple[float, bool, float]:
     """过去 3 秒深度的中位数；数据中断时 pre_depth 未知 -> onset_ok=False。"""
     keys = df["market_time_key"].to_numpy()
@@ -253,8 +306,8 @@ def _check_onset(
         dv = df.at[j, "delta_volume"]
         if not (np.isfinite(dv) and dv > 0):
             continue
-        d = max(last_down_ticks[j] if np.isfinite(last_down_ticks[j]) else 0.0,
-                vwap_down_ticks[j] if np.isfinite(vwap_down_ticks[j]) else 0.0)
+        d = max(last_depth_ticks[j] if np.isfinite(last_depth_ticks[j]) else 0.0,
+                vwap_depth_ticks[j] if np.isfinite(vwap_depth_ticks[j]) else 0.0)
         depths.append(d)
     pre_depth = float(np.median(depths)) if depths else 0.0
     return (pre_depth, True, pre_depth)
@@ -276,14 +329,14 @@ def _is_data_eligible(df: pd.DataFrame, i: int) -> bool:
 
 def _cand_depth(
     i: int,
-    last_down_ticks: np.ndarray,
-    vwap_down_ticks: np.ndarray,
+    last_depth_ticks: np.ndarray,
+    vwap_depth_ticks: np.ndarray,
     interval_hit: bool,
 ) -> float:
-    if interval_hit and np.isfinite(vwap_down_ticks[i]):
-        return float(vwap_down_ticks[i])
-    if np.isfinite(last_down_ticks[i]):
-        return float(last_down_ticks[i])
+    if interval_hit and np.isfinite(vwap_depth_ticks[i]):
+        return float(vwap_depth_ticks[i])
+    if np.isfinite(last_depth_ticks[i]):
+        return float(last_depth_ticks[i])
     return 0.0
 
 
@@ -291,7 +344,10 @@ def _cand_depth(
 # Task 4: 事件合并
 # ===========================================================================
 
-REASON_ORDER = ("visible_execution_drop", "interval_execution_drop")
+REASON_ORDER = (
+    "visible_execution_drop", "interval_execution_drop",
+    "visible_execution_spike", "interval_execution_spike",
+)
 
 
 def merge_candidates(
@@ -306,11 +362,33 @@ def merge_candidates(
     """
     if candidates.empty:
         return candidates.copy()
-    out = candidates.sort_values("market_time_key", kind="stable").reset_index(drop=True)
+    out = candidates.copy()
+    if "event_direction" not in out.columns:
+        out["event_direction"] = "down"
+    else:
+        out["event_direction"] = out["event_direction"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
     frame = enriched_target_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
+    events: list[dict[str, object]] = []
+    for direction, directional in out.groupby("event_direction", sort=True):
+        events.extend(_merge_direction_candidates(
+            directional, frame, str(direction), max_data_gap_seconds
+        ))
+    if not events:
+        return pd.DataFrame()
+    return pd.DataFrame(events).sort_values(
+        ["event_anchor_key", "event_direction"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def _merge_direction_candidates(
+    candidates: pd.DataFrame,
+    frame: pd.DataFrame,
+    direction: str,
+    max_data_gap_seconds: int,
+) -> list[dict[str, object]]:
+    out = candidates.sort_values("market_time_key", kind="stable").reset_index(drop=True)
     keys = out["market_time_key"].to_numpy()
     n = len(out)
-
     events: list[dict[str, object]] = []
     group_start = 0
     for idx in range(1, n + 1):
@@ -344,6 +422,7 @@ def merge_candidates(
             "event_start_key": start_key,
             "event_end_key": end_key,
             "event_volume": event_volume,
+            "event_direction": direction,
             "event_depth_ticks": float(anchor["candidate_execution_depth"]),
             "trigger_reasons": reasons,
             "fair_price": float(anchor["fair_price"]),
@@ -353,9 +432,12 @@ def merge_candidates(
             "last_threshold_ticks": float(anchor["last_threshold_ticks"]),
             "vwap_threshold_ticks": float(anchor["vwap_threshold_ticks"]),
             "last_down_ticks": float(anchor.get("last_down_ticks", np.nan)),
+            "last_up_ticks": float(anchor.get("last_up_ticks", np.nan)),
             "vwap_down_ticks": float(anchor.get("vwap_down_ticks", np.nan)),
+            "vwap_up_ticks": float(anchor.get("vwap_up_ticks", np.nan)),
             "combined_vwap_1s": float(anchor.get("combined_vwap_1s", np.nan)),
             "combined_vwap_down_ticks": float(anchor.get("combined_vwap_down_ticks", np.nan)),
+            "combined_vwap_up_ticks": float(anchor.get("combined_vwap_up_ticks", np.nan)),
             "interval_confirmation_end_time": anchor.get("interval_confirmation_end_time", np.nan),
             "onset_ticks": float(anchor.get("onset_ticks", np.nan)),
             "noise_sample_count": int(anchor.get("noise_sample_count", 0)),
@@ -367,7 +449,7 @@ def merge_candidates(
         }
         events.append(event)
         group_start = idx
-    return pd.DataFrame(events)
+    return events
 
 
 def _sum_positive_delta_volume(frame: pd.DataFrame, start_key: int, end_key: int) -> float:
@@ -420,6 +502,7 @@ def attach_recovery_metrics(
     out["visible_recovered_seconds"] = np.nan
     out["interval_recovered_seconds"] = np.nan
     out["quote_recovered_seconds"] = np.nan
+    out["ask_recovered_seconds"] = np.nan
     out["recovery_truncated"] = False
 
     tick_size = float(profile["tick_size"])
@@ -433,9 +516,11 @@ def attach_recovery_metrics(
         event = out.iloc[ei]
         anchor_key = int(event["event_anchor_key"])
         reasons = str(event.get("trigger_reasons", "")).split(",")
+        direction = str(event.get("event_direction", "down")).lower()
+        if direction not in {"down", "up"}:
+            direction = "down"
         anchor_thr_last = float(event["last_threshold_ticks"])
         anchor_thr_vwap = float(event["vwap_threshold_ticks"])
-        fair_price = float(event["fair_price"])
         peer_bases = event.get("__peer_bases", {})
         peer_contracts = event.get("__valid_peer_contracts", [])
 
@@ -445,8 +530,12 @@ def attach_recovery_metrics(
             out.at[ei, "recovery_truncated"] = True
             continue
 
-        visible_triggered = "visible_execution_drop" in reasons
-        interval_triggered = "interval_execution_drop" in reasons
+        visible_triggered = (
+            "visible_execution_drop" if direction == "down" else "visible_execution_spike"
+        ) in reasons
+        interval_triggered = (
+            "interval_execution_drop" if direction == "down" else "interval_execution_spike"
+        ) in reasons
 
         # 收集恢复窗口内的 target 帧（不跨数据断点）
         window_rows = _collect_recovery_window(frame, anchor_pos, tick_size)
@@ -476,21 +565,21 @@ def attach_recovery_metrics(
             # 可见通道
             if visible_triggered and not np.isfinite(visible_recovered_sec):
                 if np.isfinite(dv) and dv > 0 and np.isfinite(last) and last > 0:
-                    last_rem = (rec_fp - last) / tick_size
+                    last_rem = (rec_fp - last) / tick_size if direction == "down" else (last - rec_fp) / tick_size
                     if last_rem < anchor_thr_last:
                         visible_recovered_sec = elapsed
             # 区间均价通道：需完整 1s 确认窗
             if interval_triggered and not np.isfinite(interval_recovered_sec):
                 conf = _compute_1s_confirmation(frame, wpos, tick_size, multiplier)
                 if conf["window_complete"]:
-                    cv = (rec_fp - conf["combined_vwap"]) / tick_size
+                    cv = (rec_fp - conf["combined_vwap"]) / tick_size if direction == "down" else (conf["combined_vwap"] - rec_fp) / tick_size
                     if cv < anchor_thr_vwap:
                         interval_recovered_sec = (int(conf["confirmation_end_key"]) - anchor_key) / 1000.0
             # 报价通道
             if not np.isfinite(quote_recovered_sec):
-                bid = frame.at[wpos, "BidPrice1"]
-                if np.isfinite(bid) and bid > 0:
-                    quote_rem = (rec_fp - bid) / tick_size
+                quote = frame.at[wpos, "BidPrice1" if direction == "down" else "AskPrice1"]
+                if np.isfinite(quote) and quote > 0:
+                    quote_rem = (rec_fp - quote) / tick_size if direction == "down" else (quote - rec_fp) / tick_size
                     if quote_rem < anchor_thr_last:
                         quote_recovered_sec = elapsed
 
@@ -502,7 +591,10 @@ def attach_recovery_metrics(
 
         out.at[ei, "visible_recovered_seconds"] = visible_recovered_sec
         out.at[ei, "interval_recovered_seconds"] = interval_recovered_sec
-        out.at[ei, "quote_recovered_seconds"] = quote_recovered_sec
+        if direction == "down":
+            out.at[ei, "quote_recovered_seconds"] = quote_recovered_sec
+        else:
+            out.at[ei, "ask_recovered_seconds"] = quote_recovered_sec
 
         out.at[ei, "recovery_label"] = _classify_recovery(
             visible_triggered, interval_triggered,

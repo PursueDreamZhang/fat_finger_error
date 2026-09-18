@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from run_tick_detector import _build_diagnostics, _build_peer_raw_windows, _build_replay_payload, parse_args, run_detection
+from run_tick_detector import CSV_COLUMNS, _build_diagnostics, _build_peer_raw_windows, _build_replay_payload, _finalize_event_fields, _map_to_chinese_csv, parse_args, run_detection
 from src.tick_detector.report_html import _render_event_section, _render_peer_blocks
 
 
@@ -67,6 +67,31 @@ def test_target_worker_validation():
         parse_args(
             ["--tick-day-path", "data/tick2026/202605/20260520.zip", "--target-workers", "0"]
         )
+
+
+def test_finalize_up_event_uses_distinct_id_and_notional_excess():
+    events = pd.DataFrame([{
+        "contract": "AU2606", "event_anchor_time": "09:00:01.000", "event_anchor_key": 1000,
+        "event_direction": "up", "fair_price": 100.0, "last_down_ticks": -20.0,
+        "last_up_ticks": 20.0, "vwap_down_ticks": -50.0, "vwap_up_ticks": 50.0,
+        "event_depth_ticks": 50.0, "interval_confirmation_end_time": float("nan"),
+    }])
+    enriched = pd.DataFrame([{
+        "market_time_key": 1000, "display_time": "09:00:01.000", "delta_volume": 10.0,
+        "delta_turnover": 1010000.0, "interval_vwap": 101.0, "LastPrice": 100.4,
+    }])
+    row = _finalize_event_fields(events, enriched, 0.02, 1000, "AU_V1", "validated").iloc[0]
+    assert row["event_id"] == "AU2606|09:00:01.000|up"
+    assert row["last_up_bps"] == pytest.approx(40.0)
+    assert row["event_depth_bps"] == pytest.approx(100.0)
+    assert row["notional_shortfall"] == 0
+    assert row["notional_excess"] == pytest.approx(10000.0)
+
+
+def test_empty_event_csv_mapping_keeps_all_v2_headers():
+    mapped = _map_to_chinese_csv(pd.DataFrame(columns=["event_direction", "last_up_ticks"]))
+    assert mapped.empty
+    assert mapped.columns.tolist() == [header for _, header in CSV_COLUMNS]
 
 
 _TICK_COLUMNS = [

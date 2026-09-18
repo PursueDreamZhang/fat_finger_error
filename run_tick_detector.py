@@ -13,6 +13,7 @@ import pandas as pd
 from src.tick_detector.event_detection import (
     attach_recovery_metrics,
     detect_candidate_ticks,
+    extract_candidate_ticks,
     merge_candidates,
 )
 from src.tick_detector.reference_selection import (
@@ -29,7 +30,7 @@ from src.tick_detector.tick_io import (
     prepare_contract_snapshots,
 )
 
-DETECTOR_VERSION = "aggregated-tick-v1"
+DETECTOR_VERSION = "aggregated-tick-v2"
 
 _WORKER_DAY_FRAMES: dict[str, pd.DataFrame] = {}
 
@@ -48,6 +49,7 @@ CSV_COLUMNS: list[tuple[str, str]] = [
     ("event_anchor_start_key", "事件锚点开始序号"),
     ("event_anchor_end_key", "事件锚点结束序号"),
     ("event_end_key", "事件结束序号"),
+    ("event_direction", "异常方向"),
     ("trigger_reasons", "触发原因"),
     ("fair_price", "合理价"),
     ("fair_uncertainty_ticks", "合理价不确定性_跳"),
@@ -60,10 +62,15 @@ CSV_COLUMNS: list[tuple[str, str]] = [
     ("interval_vwap_anchor", "区间成交均价"),
     ("last_down_ticks", "末笔向下偏离_跳"),
     ("last_down_bps", "末笔向下偏离_基点"),
+    ("last_up_ticks", "末笔向上偏离_跳"),
+    ("last_up_bps", "末笔向上偏离_基点"),
     ("vwap_down_ticks", "区间均价向下偏离_跳"),
     ("vwap_down_bps", "区间均价向下偏离_基点"),
+    ("vwap_up_ticks", "区间均价向上偏离_跳"),
+    ("vwap_up_bps", "区间均价向上偏离_基点"),
     ("combined_vwap_1s", "一秒合并成交均价"),
     ("combined_vwap_down_ticks", "一秒合并均价向下偏离_跳"),
+    ("combined_vwap_up_ticks", "一秒合并均价向上偏离_跳"),
     ("last_threshold_ticks", "末笔触发阈值_跳"),
     ("vwap_threshold_ticks", "区间均价触发阈值_跳"),
     ("onset_ticks", "突发偏离_跳"),
@@ -74,10 +81,12 @@ CSV_COLUMNS: list[tuple[str, str]] = [
     ("interval_delta_turnover", "区间增量成交额"),
     ("event_volume", "事件成交量"),
     ("notional_shortfall", "名义成交额缺口"),
+    ("notional_excess", "名义成交额超额"),
     ("recovery_label", "回归标签"),
     ("visible_recovered_seconds", "可见末笔恢复确认秒数"),
     ("interval_recovered_seconds", "区间均价恢复确认秒数"),
     ("quote_recovered_seconds", "买一恢复确认秒数"),
+    ("ask_recovered_seconds", "卖一恢复确认秒数"),
     ("data_quality_flags", "数据质量标记"),
 ]
 
@@ -283,9 +292,9 @@ def _detect_contract(
         tick_size=tick_size,
         top_volume_peer_contracts=set(ref_codes[:3]),
     )
-    # marked = 全行检测帧（含 fair_price / last_down_ticks / vwap_down_ticks），供复盘窗口展示
+    # marked = 全行检测帧（含双向偏离），供复盘窗口展示。
     marked = detect_candidate_ticks(enriched, return_marked=True)
-    candidates = marked.loc[marked["candidate_execution_depth"].notna()].copy()
+    candidates = extract_candidate_ticks(marked)
     events = merge_candidates(candidates, enriched)
     if events.empty:
         diag = _build_diagnostics(
@@ -422,15 +431,21 @@ def _finalize_event_fields(
 ) -> pd.DataFrame:
     """补充事件级展示与派生字段。"""
     events = events.copy()
+    if "event_direction" not in events:
+        events["event_direction"] = "down"
+    else:
+        events["event_direction"] = events["event_direction"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
     events["detector_version"] = DETECTOR_VERSION
     events["parameter_profile"] = parameter_profile
     events["validation_status"] = validation_status
     events["event_id"] = [
-        f"{row['contract']}|{row['event_anchor_time']}"
+        f"{row['contract']}|{row['event_anchor_time']}" + ("|up" if str(row.get("event_direction", "down")) == "up" else "")
         for _, row in events.iterrows()
     ]
     events["last_down_bps"] = events["last_down_ticks"] * tick_size / events["fair_price"] * 10000
+    events["last_up_bps"] = events["last_up_ticks"] * tick_size / events["fair_price"] * 10000
     events["vwap_down_bps"] = events["vwap_down_ticks"] * tick_size / events["fair_price"] * 10000
+    events["vwap_up_bps"] = events["vwap_up_ticks"] * tick_size / events["fair_price"] * 10000
     events["event_depth_bps"] = events["event_depth_ticks"] * tick_size / events["fair_price"] * 10000
     events["depth_source"] = "detector_event_depth"
     # 区间增量成交量/额（锚点帧）
@@ -459,8 +474,13 @@ def _finalize_event_fields(
     events["baseline_min_samples"] = 20
     # 名义成交额缺口 = max(0, fair_price - interval_vwap) * delta_volume * multiplier
     events["notional_shortfall"] = np.where(
-        (events["fair_price"] > events["interval_vwap_anchor"]) & events["interval_delta_volume"].notna(),
+        (events["event_direction"].eq("down")) & (events["fair_price"] > events["interval_vwap_anchor"]) & events["interval_delta_volume"].notna(),
         np.maximum(0, events["fair_price"] - events["interval_vwap_anchor"]) * events["interval_delta_volume"] * multiplier,
+        0.0,
+    )
+    events["notional_excess"] = np.where(
+        (events["event_direction"].eq("up")) & (events["interval_vwap_anchor"] > events["fair_price"]) & events["interval_delta_volume"].notna(),
+        np.maximum(0, events["interval_vwap_anchor"] - events["fair_price"]) * events["interval_delta_volume"] * multiplier,
         0.0,
     )
     # 确认结束时间映射到 display_time
@@ -492,14 +512,12 @@ def _build_events_df(all_events: list[pd.DataFrame]) -> pd.DataFrame:
 
 def _map_to_chinese_csv(events_df: pd.DataFrame) -> pd.DataFrame:
     """内部英文 DataFrame 列映射为中文 CSV 表头；排除双下划线内部字段。"""
-    out = pd.DataFrame(index=range(len(events_df)))
+    out = pd.DataFrame(index=events_df.index, columns=[header for _, header in CSV_COLUMNS])
     seen_english: set[str] = set()
     for eng_key, cn_header in CSV_COLUMNS:
         if eng_key in events_df.columns and eng_key not in seen_english:
             out[cn_header] = events_df[eng_key].values
             seen_english.add(eng_key)
-        else:
-            out[cn_header] = pd.NA
     return out
 
 
@@ -513,7 +531,7 @@ def _build_replay_payload(
 ) -> None:
     """为每个事件构建 [锚点前10秒, 锚点后10秒] 同窗口 replay payload。
 
-    target_frame 用检测后的全行帧（含 fair_price / last_down_ticks / vwap_down_ticks），
+    target_frame 用检测后的全行帧（含 fair_price / 双向偏离），
     这样目标检测明细能展示检测派生列；参考合约窗口仍取 day_frames 的原始帧。
     """
     target_df = target_frame
@@ -547,7 +565,8 @@ def _build_target_detail(window: pd.DataFrame, event: pd.Series) -> list[dict[st
         "AskPrice1", "AskVolume1", "AveragePrice", "OpenInterest",
         "UpperLimitPrice", "LowerLimitPrice",
         "delta_volume", "delta_turnover", "interval_vwap",
-        "fair_price", "last_down_ticks", "vwap_down_ticks",
+        "fair_price", "last_down_ticks", "last_up_ticks", "vwap_down_ticks", "vwap_up_ticks",
+        "combined_vwap_down_ticks", "combined_vwap_up_ticks", "down_trigger_reasons", "up_trigger_reasons",
     ]
     # market_time_key 不展示但需保留以标记候选锚点
     available = [c for c in detail_cols if c in window.columns]

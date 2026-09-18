@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.manual_simulation import _point_fair_price, build_scenarios, simulate_event
+from src.manual_simulation import _load_selected_events, _point_fair_price, build_scenarios, simulate_event
 
 
 def _frame(contract: str, rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -157,6 +157,21 @@ def _scenario() -> dict[str, float]:
         "hedge_delay_seconds": 5.0,
         "exit_delay_seconds": 10.0,
     }
+
+
+def test_selected_events_excludes_up_direction_with_auditable_reason(tmp_path):
+    path = tmp_path / "events.csv"
+    pd.DataFrame([
+        {**_event(), "异常方向": "down"},
+        {**_event(), "事件编号": "NI2605|20260302|100|up", "异常方向": "up"},
+    ]).to_csv(path, index=False)
+    config = {
+        "events_csv": str(path), "commodities": set(), "trade_date_start": None,
+        "trade_date_end": None, "quality_exclusions": [], "max_events": None,
+    }
+    selected, excluded = _load_selected_events(config)
+    assert selected["__event_direction"].tolist() == ["down"]
+    assert excluded["exclusion_reason"].tolist() == ["unsupported_event_direction_up"]
 
 
 def test_event_fill_models_manual_hedge_and_full_margin():

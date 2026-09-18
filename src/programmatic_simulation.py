@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from html import escape
 import json
 import math
@@ -31,6 +31,42 @@ from src.tick_detector.tick_io import (
 
 FILL_MODELS = {"strict_cross", "observable_cross_assumed"}
 TARGET_ORDER_ROLES = ("target_buy", "target_sell")
+MID_DISTANCE_MODE = "mid_distance_band"
+QUOTE_MODES = {"last_price_grid", MID_DISTANCE_MODE}
+MID_DISTANCE_REQUIRED_COLUMNS = frozenset(
+    {
+        "InstrumentID",
+        "Direction",
+        "SafeDistance",
+        "TargetDistance",
+        "MinDistance",
+        "MaxDistance",
+        "Status",
+    }
+)
+MID_DISTANCE_EXECUTION_KEYS = frozenset(
+    {
+        "account_equity",
+        "max_margin_ratio",
+        "default_margin_rate",
+        "margin_rate_by_commodity",
+        "default_commission_per_lot_per_side",
+        "commission_by_commodity",
+        "target_lots",
+        "order_effective_latency_ms",
+        "quote_check_interval_ms",
+        "cancel_ack_latency_ms",
+        "new_order_ack_latency_ms",
+        "max_quote_age_ms",
+        "max_data_gap_ms",
+        "quote_spread_multiple",
+        "require_top_of_book_full_lot",
+        "max_order_actions_per_minute",
+        "tick_size",
+        "contract_multiplier",
+        "enable_hedge",
+    }
+)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "tick_data_root": "data/tick2026",
@@ -54,9 +90,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_lots": 1,
     "hedge_lots": 1,
     "enable_hedge": True,
-    "band_half_width_ticks": 10,
-    "outer_quote_offset_ticks": 10,
-    "reanchor_step_ticks": 10,
+    "band_half_width_pct": 1.0,
+    "outer_quote_offset_pct": 1.0,
+    "reanchor_step_pct": 1.0,
     "quote_spread_multiple": 2.0,
     "reanchor_confirm_ms": 1000,
     "resume_confirm_ms": 2000,
@@ -67,6 +103,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hedge_submit_latency_ms": 500,
     "max_hedge_wait_ms": 2000,
     "hedged_exit_delay_ms": 2000,
+    "order_effective_latency_ms": 500,
+    "quote_check_interval_ms": 1000,
     "max_quote_age_ms": 3000,
     "max_fair_age_ms": 3000,
     "max_data_gap_ms": 3000,
@@ -74,6 +112,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "require_top_of_book_full_lot": True,
     "cooldown_ms": 1000,
 }
+PERCENTAGE_CONFIG_KEYS = ("band_half_width_pct", "outer_quote_offset_pct", "reanchor_step_pct")
+LEGACY_QUOTE_CONFIG_KEYS = frozenset(
+    {
+        "band_half_width_ticks",
+        "outer_quote_offset_ticks",
+        "reanchor_step_ticks",
+        "W",
+        "D",
+        "S",
+        "W_ticks",
+        "D_ticks",
+        "S_ticks",
+    }
+)
 
 STATE_COLUMNS = [
     "trade_date",
@@ -83,6 +135,12 @@ STATE_COLUMNS = [
     "to_state",
     "reason",
     "grid_anchor",
+    "W_pct",
+    "D_pct",
+    "S_pct",
+    "W_ticks",
+    "D_ticks",
+    "S_ticks",
     "buy_limit",
     "sell_limit",
     "fair_price",
@@ -101,6 +159,10 @@ ORDER_COLUMNS = [
     "price",
     "lots",
     "version",
+    "effective_key",
+    "quote_mode",
+    "source_file",
+    "source_row",
     "event",
     "detail",
     "state",
@@ -135,6 +197,21 @@ TRADE_COLUMNS = [
     "unhedged_worst_mark_pnl",
     "hedged_worst_mark_pnl",
     "observed_worst_mark_pnl",
+    "entry_order_id",
+    "entry_effective_key",
+    "fill_source_file",
+    "fill_source_row",
+    "exit_source_file",
+    "exit_source_row",
+    "quote_mode",
+    "hold_ms",
+    "entry_mid_price",
+    "safe_distance",
+    "target_distance",
+    "min_distance",
+    "max_distance",
+    "planned_exit_key",
+    "actual_exit_delay_ms",
 ]
 
 SUMMARY_COLUMNS = [
@@ -172,8 +249,69 @@ def load_programmatic_simulation_config(path: str | Path) -> dict[str, Any]:
     return normalize_programmatic_simulation_config(raw)
 
 
+def load_mid_distance_replay_config(path: str | Path) -> dict[str, Any]:
+    """读取新模式仅允许的执行假设覆盖，不接受旧网格或对冲字段。"""
+    config_path = Path(path)
+    with config_path.open(encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, Mapping):
+        raise ValueError("Mid 距离带执行配置必须是 JSON 对象")
+    raw = dict(raw)
+    forbidden = sorted(set(raw) - MID_DISTANCE_EXECUTION_KEYS)
+    if forbidden:
+        raise ValueError(
+            "Mid 距离带配置只允许执行假设字段，禁止: " + ", ".join(forbidden)
+        )
+    if "enable_hedge" in raw and _as_bool(raw["enable_hedge"], "enable_hedge") is not False:
+        raise ValueError("Mid 距离带模式固定不对冲，enable_hedge 必须为 false")
+    config = dict(raw)
+    config["enable_hedge"] = False
+    for key in ("account_equity", "default_margin_rate", "quote_spread_multiple"):
+        if key in config:
+            config[key] = _positive_number(config[key], key)
+    if "max_margin_ratio" in config:
+        config["max_margin_ratio"] = _fraction(config["max_margin_ratio"], "max_margin_ratio")
+    if "margin_rate_by_commodity" in config:
+        config["margin_rate_by_commodity"] = _number_map(
+            config["margin_rate_by_commodity"], "margin_rate_by_commodity", allow_zero=False
+        )
+    if "commission_by_commodity" in config:
+        config["commission_by_commodity"] = _number_map(
+            config["commission_by_commodity"], "commission_by_commodity", allow_zero=True
+        )
+    if "default_commission_per_lot_per_side" in config:
+        config["default_commission_per_lot_per_side"] = _nonnegative_number(
+            config["default_commission_per_lot_per_side"], "default_commission_per_lot_per_side"
+        )
+    if "target_lots" in config:
+        config["target_lots"] = _positive_int(config["target_lots"], "target_lots")
+    for key in ("max_order_actions_per_minute", "quote_check_interval_ms", "max_quote_age_ms", "max_data_gap_ms"):
+        if key in config:
+            config[key] = _positive_int(config[key], key)
+    for key in ("order_effective_latency_ms", "cancel_ack_latency_ms", "new_order_ack_latency_ms"):
+        if key in config:
+            config[key] = _nonnegative_int(config[key], key)
+    if "require_top_of_book_full_lot" in config:
+        config["require_top_of_book_full_lot"] = _as_bool(
+            config["require_top_of_book_full_lot"], "require_top_of_book_full_lot"
+        )
+    config["_execution_config_path"] = str(config_path)
+    return config
+
+
 def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     """补齐默认值并拦截会改变回放语义的无效配置。"""
+    present = sorted(LEGACY_QUOTE_CONFIG_KEYS.intersection(raw))
+    if present:
+        raise ValueError(
+            f"回放配置必须使用百分比字段，不能使用旧字段：{', '.join(present)}；请重新生成百分比参数"
+        )
+    missing_percentage_keys = [key for key in PERCENTAGE_CONFIG_KEYS if key not in raw]
+    if missing_percentage_keys:
+        raise ValueError(
+            "回放配置必须显式提供百分比字段，请重新生成百分比参数："
+            + ", ".join(missing_percentage_keys)
+        )
     config = dict(DEFAULT_CONFIG)
     config.update(dict(raw))
     for key in ("tick_data_root", "daily_data_root", "output_dir", "commodity", "target_contract", "hedge_contract"):
@@ -210,8 +348,12 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     config["hedge_lots"] = _positive_int(config.get("hedge_lots"), "hedge_lots")
     config["enable_hedge"] = _as_bool(config.get("enable_hedge"), "enable_hedge")
 
-    for key in ("band_half_width_ticks", "outer_quote_offset_ticks", "reanchor_step_ticks"):
+    for key in PERCENTAGE_CONFIG_KEYS:
         config[key] = _positive_number(config.get(key), key)
+        if config[key] >= 100:
+            raise ValueError(f"{key} 必须小于 100（单位为百分比）")
+    if config["band_half_width_pct"] + config["outer_quote_offset_pct"] >= 100:
+        raise ValueError("band_half_width_pct + outer_quote_offset_pct 必须小于 100")
     config["quote_spread_multiple"] = _positive_number(config.get("quote_spread_multiple"), "quote_spread_multiple")
     for key in (
         "reanchor_confirm_ms",
@@ -239,18 +381,169 @@ def normalize_programmatic_simulation_config(raw: Mapping[str, Any]) -> dict[str
     return config
 
 
+def _normalize_mid_direction(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"BUY", "DOWN", "LONG"}:
+        return "BUY"
+    if text in {"SELL", "UP", "SHORT"}:
+        return "SELL"
+    return text
+
+
+def load_mid_distance_parameters(
+    path: str | Path,
+    contracts: Iterable[str] | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """读取 ``auto_parameters.csv``，返回按合约和方向索引的已校验参数。"""
+    parameter_path = Path(path)
+    if not parameter_path.is_file():
+        raise FileNotFoundError(f"自动选参文件不存在: {parameter_path}")
+    frame = pd.read_csv(parameter_path)
+    missing = sorted(MID_DISTANCE_REQUIRED_COLUMNS - set(frame.columns))
+    if missing:
+        raise ValueError(f"自动选参 CSV 缺少字段: {', '.join(missing)}")
+
+    contract_filter = {
+        str(value).strip().upper()
+        for value in (contracts or ())
+        if str(value).strip()
+    }
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    seen: set[tuple[str, str]] = set()
+    allowed_statuses = {"OK", "NO_QUALIFIED_DISTANCE"}
+    for row_number, row in enumerate(frame.to_dict("records"), start=2):
+        instrument = str(row.get("InstrumentID") or "").strip().upper()
+        direction = _normalize_mid_direction(row.get("Direction"))
+        status = str(row.get("Status") or "").strip().upper()
+        if not instrument:
+            raise ValueError(f"自动选参 CSV 第 {row_number} 行 InstrumentID 为空")
+        if contract_filter and instrument not in contract_filter:
+            continue
+        if direction not in {"BUY", "SELL"}:
+            raise ValueError(f"自动选参 CSV 第 {row_number} 行 Direction 无效: {direction!r}")
+        if status not in allowed_statuses:
+            raise ValueError(f"自动选参 CSV 第 {row_number} 行 Status 无效: {status!r}")
+        key = (instrument, direction)
+        if key in seen:
+            raise ValueError(f"自动选参 CSV 存在重复合约方向: {instrument}/{direction}")
+        seen.add(key)
+
+        values: dict[str, Any] = {"InstrumentID": instrument, "Direction": direction, "Status": status}
+        for name in ("SafeDistance", "TargetDistance", "MinDistance", "MaxDistance"):
+            values[name] = _finite_number(row.get(name))
+        for name, value in row.items():
+            if name not in values:
+                values[name] = value
+        if status == "OK":
+            safe = values["SafeDistance"]
+            target = values["TargetDistance"]
+            minimum = values["MinDistance"]
+            maximum = values["MaxDistance"]
+            if any(value is None for value in (safe, target, minimum, maximum)):
+                raise ValueError(f"自动选参 CSV 第 {row_number} 行 OK 参数必须是有限数字")
+            if not (0 <= safe <= target and 0 < minimum <= target <= maximum < 1):
+                raise ValueError(f"自动选参 CSV 第 {row_number} 行距离关系无效")
+        result.setdefault(instrument, {})[direction] = values
+    if contract_filter:
+        unknown = sorted(contract_filter - set(result))
+        if unknown:
+            raise ValueError(f"参数文件没有请求的合约: {', '.join(unknown)}")
+    if not result:
+        raise ValueError("自动选参 CSV 没有可用参数")
+    return result
+
+
+def _validate_mid_parameter_rows(
+    rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """校验单个合约的 BUY/SELL 参数，供文件和直接调用共用。"""
+    if not isinstance(rows, Mapping):
+        raise ValueError("Mid 距离参数必须按 BUY/SELL 提供对象")
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_direction, raw in rows.items():
+        direction = _normalize_mid_direction(raw_direction)
+        if direction not in {"BUY", "SELL"}:
+            raise ValueError(f"Mid 距离参数 Direction 无效: {raw_direction!r}")
+        if direction in normalized:
+            raise ValueError(f"Mid 距离参数存在重复方向: {direction}")
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"Mid 距离参数 {direction} 必须是对象")
+        status = str(raw.get("Status") or "").strip().upper()
+        if status not in {"OK", "NO_QUALIFIED_DISTANCE"}:
+            raise ValueError(f"Mid 距离参数 {direction} Status 无效: {status!r}")
+        values: dict[str, Any] = {
+            "InstrumentID": str(raw.get("InstrumentID") or "").strip().upper(),
+            "Direction": direction,
+            "Status": status,
+        }
+        if not values["InstrumentID"]:
+            values["InstrumentID"] = ""
+        for name in ("SafeDistance", "TargetDistance", "MinDistance", "MaxDistance"):
+            values[name] = _finite_number(raw.get(name))
+        if status == "OK":
+            safe = values["SafeDistance"]
+            target = values["TargetDistance"]
+            minimum = values["MinDistance"]
+            maximum = values["MaxDistance"]
+            if any(value is None for value in (safe, target, minimum, maximum)):
+                raise ValueError(f"Mid 距离参数 {direction} 必须是有限数字")
+            if not (0 <= safe <= target and 0 < minimum <= target <= maximum < 1):
+                raise ValueError(f"Mid 距离参数 {direction} 距离关系无效")
+        normalized[direction] = values
+    if not normalized:
+        raise ValueError("Mid 距离参数至少需要一个 BUY 或 SELL 方向")
+    return normalized
+
+
 def build_grid(anchor: float, tick_size: float, config: Mapping[str, Any]) -> dict[str, float]:
     """由合法 tick 锚点生成一层双向被动报价。"""
-    anchor = _round_to_tick(anchor, tick_size)
-    width = float(config["band_half_width_ticks"]) * tick_size
-    outer = float(config["outer_quote_offset_ticks"]) * tick_size
+    anchor_value = _finite_number(anchor)
+    tick_value = _finite_number(tick_size)
+    if anchor_value is None or anchor_value <= 0 or tick_value is None or tick_value <= 0:
+        raise ValueError("网格锚点和最小变动价位必须是正数")
+    anchor = _round_to_tick(anchor_value, tick_value)
+    width_ticks, outer_ticks, step_ticks = _grid_distance_ticks(anchor, tick_value, config)
+    width = width_ticks * tick_value
+    outer = outer_ticks * tick_value
+    band_lower = _round_to_tick(anchor - width, tick_value)
+    band_upper = _round_to_tick(anchor + width, tick_value)
+    buy_limit = _round_to_tick(anchor - width - outer, tick_value)
+    sell_limit = _round_to_tick(anchor + width + outer, tick_value)
+    if min(band_lower, buy_limit) <= 0:
+        raise ValueError("百分比换算后的买方网格价格无效")
     return {
         "anchor": anchor,
-        "band_lower": _round_to_tick(anchor - width, tick_size),
-        "band_upper": _round_to_tick(anchor + width, tick_size),
-        "buy_limit": _round_to_tick(anchor - width - outer, tick_size),
-        "sell_limit": _round_to_tick(anchor + width + outer, tick_size),
+        "W_pct": float(config["band_half_width_pct"]),
+        "D_pct": float(config["outer_quote_offset_pct"]),
+        "S_pct": float(config["reanchor_step_pct"]),
+        "W_ticks": width_ticks,
+        "D_ticks": outer_ticks,
+        "S_ticks": step_ticks,
+        "band_lower": band_lower,
+        "band_upper": band_upper,
+        "buy_limit": buy_limit,
+        "sell_limit": sell_limit,
     }
+
+
+def _grid_distance_ticks(anchor: float, tick_size: float, config: Mapping[str, Any]) -> tuple[int, int, int]:
+    """把百分比距离按当前锚点向上换算为最小变动价位数量。"""
+    anchor_value = _finite_number(anchor)
+    tick_value = _finite_number(tick_size)
+    if anchor_value is None or anchor_value <= 0 or tick_value is None or tick_value <= 0:
+        raise ValueError("网格锚点和最小变动价位必须是正数")
+    percentages = []
+    for key in ("band_half_width_pct", "outer_quote_offset_pct", "reanchor_step_pct"):
+        value = _finite_number(config.get(key))
+        if value is None or value <= 0 or value >= 100:
+            raise ValueError(f"{key} 必须是 0 到 100 之间的有限正数")
+        percentages.append(value)
+    if percentages[0] + percentages[1] >= 100:
+        raise ValueError("band_half_width_pct + outer_quote_offset_pct 必须小于 100")
+    return tuple(
+        max(1, math.ceil(anchor_value * value / 100.0 / tick_value - 1e-12))
+        for value in percentages
+    )
 
 
 def simulate_programmatic_day(
@@ -282,8 +575,15 @@ def _simulate_programmatic_day_prepared(
     assume_sorted: bool,
 ) -> dict[str, pd.DataFrame]:
     """网格内部入口；仅在每日准备已稳定排序时传入 ``assume_sorted=True``。"""
+    raw_config = dict(config)
+    present = sorted(LEGACY_QUOTE_CONFIG_KEYS.intersection(raw_config))
+    if present:
+        raise ValueError(f"回放配置必须使用百分比字段，不能使用旧字段：{', '.join(present)}；请重新生成百分比参数")
+    missing = [key for key in PERCENTAGE_CONFIG_KEYS if key not in raw_config]
+    if missing:
+        raise ValueError("回放配置必须显式提供百分比字段，请重新生成百分比参数：" + ", ".join(missing))
     runtime = dict(DEFAULT_CONFIG)
-    runtime.update(dict(config))
+    runtime.update(raw_config)
     replay = _DayReplay(
         target_frame,
         hedge_frame,
@@ -489,7 +789,7 @@ class _DayReplay:
                 elif _valid_last_price(row) is None:
                     if self.state not in {"PAUSED", "COOLDOWN"} or self._has_live_target_orders():
                         self._pause(row, "last_price_invalid_or_session_guard")
-                elif not _quote_spread_ok(row, self.target_tick, self.config):
+                elif not _quote_spread_ok(row, self.target_tick, self.config, grid=self.grid or None):
                     if self.state not in {"PAUSED", "COOLDOWN"} or self._has_live_target_orders():
                         self._pause(row, "quote_spread_guard")
                 else:
@@ -537,6 +837,12 @@ class _DayReplay:
                 "to_state": new_state,
                 "reason": reason,
                 "grid_anchor": self.anchor if self.anchor is not None else np.nan,
+                "W_pct": self.grid.get("W_pct", np.nan),
+                "D_pct": self.grid.get("D_pct", np.nan),
+                "S_pct": self.grid.get("S_pct", np.nan),
+                "W_ticks": self.grid.get("W_ticks", np.nan),
+                "D_ticks": self.grid.get("D_ticks", np.nan),
+                "S_ticks": self.grid.get("S_ticks", np.nan),
                 "buy_limit": self.grid.get("buy_limit", np.nan),
                 "sell_limit": self.grid.get("sell_limit", np.nan),
                 "fair_price": _fair_price(row),
@@ -565,6 +871,10 @@ class _DayReplay:
                 "price": order.get("price", np.nan),
                 "lots": order["lots"],
                 "version": order.get("version", self.version),
+                "effective_key": order.get("effective_key", np.nan),
+                "quote_mode": order.get("quote_mode", self.config.get("quote_mode", "last_price_grid")),
+                "source_file": row.get("source_file", ""),
+                "source_row": row.get("source_row", np.nan),
                 "event": event,
                 "detail": detail,
                 "state": self.state,
@@ -690,7 +1000,7 @@ class _DayReplay:
 
     def _submit_grid(self, row: pd.Series, reason: str) -> bool:
         key = _row_key(row)
-        if key is None or not _quote_spread_ok(row, self.target_tick, self.config) or not self._can_submit(key, 2):
+        if key is None or not _quote_spread_ok(row, self.target_tick, self.config, grid=self.grid or None) or not self._can_submit(key, 2):
             return False
         buy_id = self._submit_passive(
             row,
@@ -716,10 +1026,18 @@ class _DayReplay:
         old_ids = self.replace["old_order_ids"]
         if any(self._is_live(self.orders_by_id[order_id]) for order_id in old_ids if order_id in self.orders_by_id):
             return
-        self.anchor = float(self.replace["new_anchor"])
-        self.grid = build_grid(self.anchor, self.target_tick, self.config)
+        new_anchor = float(self.replace["new_anchor"])
+        try:
+            new_grid = build_grid(new_anchor, self.target_tick, self.config)
+        except ValueError:
+            self.replace = None
+            self._pause(row, "grid_invalid")
+            return
+        self.anchor = new_anchor
+        self.grid = new_grid
         self.version += 1
-        if not _quote_spread_ok(row, self.target_tick, self.config):
+        self._record_transition(row, "REPLACE_PENDING", "reanchor_grid_built")
+        if not _quote_spread_ok(row, self.target_tick, self.config, grid=self.grid):
             self.replace = None
             self._pause(row, "quote_spread_guard")
             return
@@ -796,8 +1114,12 @@ class _DayReplay:
         if key is None:
             return
         candidate_anchor = _round_to_tick(last_price, self.target_tick)
-        candidate_grid = build_grid(candidate_anchor, self.target_tick, self.config)
-        if not _quote_spread_ok(row, self.target_tick, self.config):
+        try:
+            candidate_grid = build_grid(candidate_anchor, self.target_tick, self.config)
+        except ValueError:
+            self._record_transition(row, "PAUSED", "grid_invalid")
+            return
+        if not _quote_spread_ok(row, self.target_tick, self.config, grid=candidate_grid):
             self._pause(row, "quote_spread_guard")
             return
         if not self._quote_margin_ok(key, candidate_grid):
@@ -841,7 +1163,7 @@ class _DayReplay:
             self._pause(row, "order_action_limit")
             return
 
-        step_price = float(self.config["reanchor_step_ticks"]) * self.target_tick
+        step_price = float(self.grid["S_ticks"]) * self.target_tick
         if direction == "down":
             steps = math.ceil((float(self.grid["band_lower"]) - last_price) / step_price - 1e-12)
             new_anchor = float(self.anchor) - max(1, steps) * step_price
@@ -916,6 +1238,8 @@ class _DayReplay:
         fill_context = "normal_quote"
         if self.state == "REPLACE_PENDING" or order.get("cancel_reason") == "reanchor":
             fill_context = "fill_during_replace"
+        elif order.get("cancel_reason") == "opposite_target_fill":
+            fill_context = "late_cancel_fill"
         elif order.get("cancel_reason"):
             fill_context = "fill_during_cancel"
         self._cancel_target_orders(row, "opposite_target_fill")
@@ -933,6 +1257,10 @@ class _DayReplay:
             "event_label": self._event_label(key),
             "fill_evidence": "+".join(evidence),
             "target_entry_price": float(order["price"]),
+            "entry_order_id": order["order_id"],
+            "entry_effective_key": order.get("effective_key", np.nan),
+            "fill_source_file": row.get("source_file", ""),
+            "fill_source_row": row.get("source_row", np.nan),
             "target_open": True,
             "hedge_open": False,
             "hedge_due_key": key + int(self.config["hedge_submit_latency_ms"]),
@@ -1275,6 +1603,12 @@ class _DayReplay:
             "unhedged_worst_mark_pnl": trade["unhedged_worst_mark_pnl"],
             "hedged_worst_mark_pnl": trade["hedged_worst_mark_pnl"],
             "observed_worst_mark_pnl": trade["observed_worst_mark_pnl"],
+            "entry_order_id": trade.get("entry_order_id", ""),
+            "entry_effective_key": trade.get("entry_effective_key", np.nan),
+            "fill_source_file": trade.get("fill_source_file", ""),
+            "fill_source_row": trade.get("fill_source_row", np.nan),
+            "exit_source_file": row.get("source_file", ""),
+            "exit_source_row": row.get("source_row", np.nan),
         }
         self.trade_log.append(record)
         self.trade = None
@@ -1319,6 +1653,689 @@ class _DayReplay:
                 self._log_order(self.last_row, order, "expired", "end_of_day")
 
 
+MID_DISTANCE_CHECK_COLUMNS = [
+    "trade_date",
+    "market_time_key",
+    "display_time",
+    "source_file",
+    "source_row",
+    "direction",
+    "mid_price",
+    "safe_distance",
+    "target_distance",
+    "min_distance",
+    "max_distance",
+    "order_id",
+    "order_status",
+    "order_price",
+    "effective_distance",
+    "action",
+    "reason",
+]
+
+
+class _MidDistanceReplay(_DayReplay):
+    """以目标合约 Mid 和自动选参距离运行的单日无对冲回放。"""
+
+    def __init__(
+        self,
+        target_frame: pd.DataFrame,
+        parameters: Mapping[str, Mapping[str, Any]],
+        config: Mapping[str, Any],
+        *,
+        trade_date: str,
+        hold_ms: int,
+        assume_sorted: bool = False,
+    ) -> None:
+        runtime = dict(DEFAULT_CONFIG)
+        runtime.update(dict(config))
+        runtime["enable_hedge"] = False
+        runtime["quote_mode"] = MID_DISTANCE_MODE
+        runtime["hedged_exit_delay_ms"] = hold_ms
+        runtime["target_only_exit_delay_ms"] = hold_ms
+        super().__init__(
+            target_frame,
+            pd.DataFrame(),
+            runtime,
+            trade_date=trade_date,
+            detector_event_keys=set(),
+            assume_sorted=assume_sorted,
+        )
+        self.mid_parameters = {
+            direction: dict(value)
+            for direction, value in parameters.items()
+            if direction in {"BUY", "SELL"} and str(value.get("Status", "")).upper() == "OK"
+        }
+        self.hold_ms = hold_ms
+        self.last_check_slot: int | None = None
+        self.quote_checks: list[dict[str, Any]] = []
+        self._mid_previous_key: int | None = None
+
+    def _record_quote_check(
+        self,
+        row: Mapping[str, Any],
+        direction: str,
+        action: str,
+        reason: str,
+        order: Mapping[str, Any] | None = None,
+        effective_distance: float | None = None,
+    ) -> None:
+        params = self.mid_parameters.get(direction, {})
+        key = _row_key(pd.Series(row))
+        self.quote_checks.append(
+            {
+                "trade_date": self.trade_date,
+                "market_time_key": key,
+                "display_time": _display_time(pd.Series(row)),
+                "source_file": row.get("source_file", ""),
+                "source_row": row.get("source_row", np.nan),
+                "direction": direction,
+                "mid_price": _finite_number(row.get("mid_price")),
+                "safe_distance": params.get("SafeDistance", np.nan),
+                "target_distance": params.get("TargetDistance", np.nan),
+                "min_distance": params.get("MinDistance", np.nan),
+                "max_distance": params.get("MaxDistance", np.nan),
+                "order_id": order.get("order_id", "") if order else "",
+                "order_status": order.get("status", "") if order else "",
+                "order_price": order.get("price", np.nan) if order else np.nan,
+                "effective_distance": effective_distance if effective_distance is not None else np.nan,
+                "action": action,
+                "reason": reason,
+            }
+        )
+
+    def _direction_order(self, direction: str) -> dict[str, Any] | None:
+        role = "target_buy" if direction == "BUY" else "target_sell"
+        for order_id in self.active_target_order_ids[role]:
+            order = self.orders_by_id.get(order_id)
+            if order is not None and self._is_live(order):
+                return order
+        return None
+
+    def _mid_value(self, row: Mapping[str, Any]) -> float | None:
+        value = _finite_number(row.get("mid_price"))
+        if value is None:
+            value = _finite_number(row.get("mid"))
+        return value if value is not None and value > 0 else None
+
+    def _directional_price(self, mid: float, direction: str, distance: float) -> tuple[float, float]:
+        raw = mid * (1.0 - distance) if direction == "BUY" else mid * (1.0 + distance)
+        ratio = raw / self.target_tick
+        ticks = math.floor(ratio + 1e-12) if direction == "BUY" else math.ceil(ratio - 1e-12)
+        price = round(ticks * self.target_tick, 10)
+        effective = ((mid - price) / mid) if direction == "BUY" else ((price - mid) / mid)
+        return price, effective
+
+    def _price_in_band(self, effective: float, params: Mapping[str, Any]) -> bool:
+        return (
+            effective >= float(params["MinDistance"]) - 1e-12
+            and effective <= float(params["MaxDistance"]) + 1e-12
+        )
+
+    def _mid_spread_ok(self, row: Mapping[str, Any], effective_distance: float) -> bool:
+        bid = _finite_number(row.get("BidPrice1"))
+        ask = _finite_number(row.get("AskPrice1"))
+        if bid is None or ask is None or ask < bid:
+            return False
+        mid = self._mid_value(row)
+        if mid is None:
+            return False
+        return effective_distance * mid > float(self.config["quote_spread_multiple"]) * (ask - bid)
+
+    def _mid_margin_ok(self, price: float) -> bool:
+        rate = _commodity_number(self.config, "margin_rate_by_commodity", "default_margin_rate", self.commodity)
+        margin = price * self.target_multiplier * int(self.config["target_lots"]) * rate
+        return margin <= float(self.config["account_equity"]) * float(self.config["max_margin_ratio"])
+
+    def _event_label(self, fill_key: int) -> str:
+        # Mid 参数回放没有旧版候选事件输入，不能把成交误标为 normal_move_fill。
+        return "unclassified"
+
+    def _submit_mid_order(self, row: Mapping[str, Any], direction: str, params: Mapping[str, Any]) -> bool:
+        mid = self._mid_value(row)
+        if mid is None:
+            self._record_quote_check(row, direction, "SKIP", "mid_invalid")
+            return False
+        price, effective = self._directional_price(mid, direction, float(params["TargetDistance"]))
+        if price <= 0:
+            self._record_quote_check(row, direction, "SKIP", "price_invalid", effective_distance=effective)
+            return False
+        if not self._price_in_band(effective, params):
+            self._record_quote_check(row, direction, "SKIP", "rounded_distance_out_of_band", effective_distance=effective)
+            return False
+        if not self._mid_spread_ok(row, effective):
+            self._record_quote_check(row, direction, "SKIP", "quote_spread_guard", effective_distance=effective)
+            return False
+        if not self._mid_margin_ok(price):
+            self._record_quote_check(row, direction, "SKIP", "capital_guard", effective_distance=effective)
+            return False
+        key = _row_key(pd.Series(row))
+        if key is None or not self._can_submit(key, 1):
+            self._record_quote_check(row, direction, "SKIP", "order_action_limit", effective_distance=effective)
+            return False
+        role = "target_buy" if direction == "BUY" else "target_sell"
+        side = "buy" if direction == "BUY" else "sell"
+        order_id = self._submit_passive(
+            pd.Series(row), role=role, side=side, price=price,
+            lots=int(self.config["target_lots"]), reason="mid_distance_submit",
+        )
+        if order_id is None:
+            self._record_quote_check(row, direction, "SKIP", "order_action_limit", effective_distance=effective)
+            return False
+        order = self.orders_by_id[order_id]
+        order["effective_key"] = key + int(self.config.get("order_effective_latency_ms", self.config.get("new_order_ack_latency_ms", 0)))
+        order["quote_mode"] = MID_DISTANCE_MODE
+        for logged in reversed(self.order_log):
+            if logged.get("order_id") == order_id and logged.get("event") == "submit":
+                logged["effective_key"] = order["effective_key"]
+                logged["quote_mode"] = MID_DISTANCE_MODE
+                break
+        self._record_quote_check(row, direction, "SUBMIT", "target_distance", order, effective)
+        return True
+
+    def _open_trade(self, row: pd.Series, order: dict[str, Any], evidence: list[str]) -> None:
+        super()._open_trade(row, order, evidence)
+        if self.trade is None:
+            return
+        params = self.mid_parameters.get("BUY" if order["side"] == "buy" else "SELL", {})
+        self.trade.update(
+            {
+                "quote_mode": MID_DISTANCE_MODE,
+                "hold_ms": self.hold_ms,
+                "entry_mid_price": self._mid_value(row),
+                "safe_distance": params.get("SafeDistance", np.nan),
+                "target_distance": params.get("TargetDistance", np.nan),
+                "min_distance": params.get("MinDistance", np.nan),
+                "max_distance": params.get("MaxDistance", np.nan),
+                "planned_exit_key": int(self.trade["fill_key"]) + self.hold_ms,
+            }
+        )
+
+    def _finalize_trade(self, row: pd.Series, reason: str, *, unclosed: bool = False) -> None:
+        context = dict(self.trade or {})
+        super()._finalize_trade(row, reason, unclosed=unclosed)
+        if not self.trade_log:
+            return
+        record = self.trade_log[-1]
+        planned = _finite_number(context.get("planned_exit_key"))
+        actual = _row_key(row)
+        record.update(
+            {
+                "quote_mode": MID_DISTANCE_MODE,
+                "hold_ms": context.get("hold_ms", self.hold_ms),
+                "entry_mid_price": context.get("entry_mid_price", np.nan),
+                "safe_distance": context.get("safe_distance", np.nan),
+                "target_distance": context.get("target_distance", np.nan),
+                "min_distance": context.get("min_distance", np.nan),
+                "max_distance": context.get("max_distance", np.nan),
+                "planned_exit_key": planned if planned is not None else np.nan,
+                "actual_exit_delay_ms": (actual - int(planned)) if planned is not None and actual is not None else np.nan,
+            }
+        )
+
+    def _check_mid_quotes(self, row: Mapping[str, Any]) -> None:
+        key = _row_key(pd.Series(row))
+        if key is None:
+            return
+        interval_ms = max(1, int(self.config.get("quote_check_interval_ms", 1000)))
+        slot = key // interval_ms
+        if self.last_check_slot == slot:
+            return
+        self.last_check_slot = slot
+        if self.trade is not None:
+            return
+        mid = self._mid_value(row)
+        if mid is None or not _row_bool(pd.Series(row), "is_tradable_session", True):
+            for direction in ("BUY", "SELL"):
+                self._record_quote_check(row, direction, "SKIP", "mid_or_session_invalid")
+            return
+        if self.state in {"PAUSED", "COOLDOWN"}:
+            self._record_transition(pd.Series(row), "FLAT_QUOTING", "mid_distance_check")
+        to_submit: list[tuple[str, Mapping[str, Any]]] = []
+        for direction in ("BUY", "SELL"):
+            params = self.mid_parameters.get(direction)
+            if params is None:
+                self._record_quote_check(row, direction, "SKIP", "no_qualified_parameter")
+                continue
+            order = self._direction_order(direction)
+            if order is not None:
+                if order["status"] == "cancel_requested":
+                    self._record_quote_check(row, direction, "WAIT", "cancel_pending", order)
+                    continue
+                effective = ((mid - float(order["price"])) / mid if direction == "BUY" else (float(order["price"]) - mid) / mid)
+                if self._price_in_band(effective, params):
+                    self._record_quote_check(row, direction, "KEEP", "distance_in_band", order, effective)
+                else:
+                    self._request_cancel(pd.Series(row), order, "mid_distance_out_of_band")
+                    self._record_quote_check(row, direction, "CANCEL", "distance_out_of_band", order, effective)
+                continue
+            to_submit.append((direction, params))
+        if to_submit and len(to_submit) > int(self.config["max_order_actions_per_minute"]) - self._action_count(key):
+            for direction, _ in to_submit:
+                self._record_quote_check(row, direction, "SKIP", "order_action_limit")
+            return
+        for direction, params in to_submit:
+            self._submit_mid_order(row, direction, params)
+
+    def _first_target_fill(self, row: pd.Series) -> tuple[dict[str, Any], list[str]] | None:
+        key = _row_key(row)
+        for order in self._active_target_orders():
+            if not self._is_live(order):
+                continue
+            effective_key = int(order.get("effective_key", -1))
+            if key is None or key <= effective_key:
+                continue
+            if self.previous_key is not None and self.previous_key < effective_key < key:
+                if not order.get("activation_unknown_logged"):
+                    direction = "BUY" if order["side"] == "buy" else "SELL"
+                    self._record_quote_check(row, direction, "SKIP", "activation_interval_unknown", order)
+                    order["activation_unknown_logged"] = True
+                continue
+            last = _finite_number(row.get("LastPrice"))
+            delta_volume = _finite_number(row.get("delta_volume"))
+            if delta_volume is None or delta_volume <= 0 or last is None:
+                continue
+            if order["side"] == "buy" and last <= float(order["price"]):
+                return order, ["last_trade_touch"]
+            if order["side"] == "sell" and last >= float(order["price"]):
+                return order, ["last_trade_touch"]
+        return None
+
+    def run(self) -> dict[str, pd.DataFrame]:
+        columns = tuple(self.target.columns)
+        for values in self.target.itertuples(index=False, name=None):
+            row = dict(zip(columns, values, strict=True))
+            key = _row_key(pd.Series(row))
+            if key is None:
+                continue
+            self.last_row = row
+            if not self.transitions:
+                self._record_transition(pd.Series(row), self.state, "start")
+            self._process_due(pd.Series(row))
+            data_gap = self.previous_key is not None and key - self.previous_key > int(self.config["max_data_gap_ms"])
+            if self.trade is None:
+                fill = self._first_target_fill(pd.Series(row))
+                if fill is not None:
+                    self._open_trade(pd.Series(row), *fill)
+                else:
+                    if data_gap:
+                        self._pause(pd.Series(row), "data_gap")
+                    else:
+                        self._check_mid_quotes(row)
+            else:
+                opposite_fill = self._first_target_fill(pd.Series(row))
+                if opposite_fill is not None:
+                    self._handle_opposite_fill(pd.Series(row), *opposite_fill)
+                if self.trade is not None:
+                    self._manage_position(pd.Series(row))
+            self.previous_key = key
+        self._finish_day()
+        return {
+            "transitions": pd.DataFrame(self.transitions, columns=STATE_COLUMNS),
+            "orders": pd.DataFrame(self.order_log, columns=ORDER_COLUMNS),
+            "trades": pd.DataFrame(self.trade_log, columns=TRADE_COLUMNS),
+            "quote_checks": pd.DataFrame(self.quote_checks, columns=MID_DISTANCE_CHECK_COLUMNS),
+        }
+
+
+def _prepare_mid_distance_frame(
+    frame: pd.DataFrame,
+    config: Mapping[str, Any],
+    *,
+    trade_date: str | None = None,
+) -> pd.DataFrame:
+    """补齐 Mid 回放所需字段，同时保留输入的同时间戳原始行。"""
+    if frame.empty:
+        raise ValueError("目标合约快照为空")
+    x = frame.copy()
+    if "market_time_key" not in x.columns:
+        if "ts_ms" in x.columns:
+            x["market_time_key"] = pd.to_numeric(x["ts_ms"], errors="coerce")
+        else:
+            raise ValueError("Mid 回放行情缺少 market_time_key 或 ts_ms")
+    x["market_time_key"] = pd.to_numeric(x["market_time_key"], errors="coerce")
+    keys = x["market_time_key"].to_numpy(dtype=float)
+    finite_keys = keys[np.isfinite(keys)]
+    if finite_keys.size and not np.equal(finite_keys, np.floor(finite_keys)).all():
+        raise ValueError("Mid 回放行情 market_time_key 必须是整数毫秒")
+    if finite_keys.size > 1 and np.any(np.diff(finite_keys) < 0):
+        raise ValueError("Mid 回放行情存在时间倒退，拒绝拼接不完整交易日")
+    if "mid_price" not in x.columns:
+        if "mid" in x.columns:
+            x["mid_price"] = pd.to_numeric(x["mid"], errors="coerce")
+        elif {"BidPrice1", "AskPrice1"}.issubset(x.columns):
+            bid = pd.to_numeric(x["BidPrice1"], errors="coerce")
+            ask = pd.to_numeric(x["AskPrice1"], errors="coerce")
+            x["mid_price"] = np.where((bid > 0) & (ask >= bid), (bid + ask) / 2.0, np.nan)
+        else:
+            x["mid_price"] = np.nan
+    if "delta_volume" not in x.columns:
+        if "Volume" in x.columns:
+            volume = pd.to_numeric(x["Volume"], errors="coerce").to_numpy(dtype=float)
+            keys = x["market_time_key"].to_numpy(dtype=float)
+            delta = np.full(len(x), np.nan, dtype=float)
+            max_gap = int(config.get("max_data_gap_ms", DEFAULT_CONFIG["max_data_gap_ms"]))
+            for index in range(1, len(x)):
+                if not (np.isfinite(keys[index]) and np.isfinite(keys[index - 1])):
+                    continue
+                if keys[index] - keys[index - 1] > max_gap or keys[index] < keys[index - 1]:
+                    continue
+                if np.isfinite(volume[index]) and np.isfinite(volume[index - 1]) and volume[index] >= volume[index - 1]:
+                    value = volume[index] - volume[index - 1]
+                    if value > 0:
+                        delta[index] = value
+            x["delta_volume"] = delta
+        else:
+            x["delta_volume"] = np.nan
+    for column, default in (
+        ("fair_price", np.nan),
+        ("fair_price_reliable", False),
+        ("is_tradable_session", True),
+        ("is_open_protected", False),
+        ("BidVolume1", 0.0),
+        ("AskVolume1", 0.0),
+    ):
+        if column not in x.columns:
+            x[column] = default
+    if "display_time" not in x.columns:
+        update_time = x["UpdateTime"].astype(str) if "UpdateTime" in x.columns else pd.Series("", index=x.index)
+        update_millis = x["UpdateMillisec"] if "UpdateMillisec" in x.columns else pd.Series(0, index=x.index)
+        millis = pd.to_numeric(update_millis, errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+        x["display_time"] = update_time + "." + millis
+    if "contract" not in x.columns:
+        x["contract"] = str(config.get("target_contract") or "").strip().upper()
+    else:
+        x["contract"] = x["contract"].astype(str).str.strip().str.upper()
+    if "commodity" not in x.columns:
+        x["commodity"] = str(config.get("commodity") or "").strip().upper()
+    else:
+        x["commodity"] = x["commodity"].astype(str).str.strip().str.upper()
+    if "trade_date" not in x.columns:
+        x["trade_date"] = trade_date or ""
+    else:
+        x["trade_date"] = x["trade_date"].astype(str)
+    if trade_date:
+        x["trade_date"] = trade_date
+    if "tick_size" not in x.columns and config.get("tick_size") is not None:
+        x["tick_size"] = config["tick_size"]
+    if "contract_multiplier" not in x.columns and config.get("contract_multiplier") is not None:
+        x["contract_multiplier"] = config["contract_multiplier"]
+    if "source_file" not in x.columns:
+        x["source_file"] = ""
+    if "source_row" not in x.columns:
+        x["source_row"] = np.arange(len(x), dtype=np.int64)
+    return x.loc[x["market_time_key"].notna()].sort_values(
+        ["market_time_key", "source_row"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def simulate_mid_distance_day(
+    target_frame: pd.DataFrame,
+    parameters: Mapping[str, Mapping[str, Any]] | Mapping[str, Mapping[str, Mapping[str, Any]]],
+    config: Mapping[str, Any] | None = None,
+    *,
+    trade_date: str | None = None,
+    hold_seconds: float = 2.0,
+) -> dict[str, pd.DataFrame]:
+    """运行一日 Mid 距离带、无对冲回放；参数可为单合约或全量索引。"""
+    hold_value = _finite_number(hold_seconds)
+    if hold_value is None or hold_value <= 0 or not (hold_value * 1000).is_integer():
+        raise ValueError("hold_seconds 必须是可换算为整数毫秒的正数")
+    runtime = dict(DEFAULT_CONFIG)
+    runtime.update(dict(config or {}))
+    runtime["enable_hedge"] = False
+    runtime["quote_mode"] = MID_DISTANCE_MODE
+    runtime["order_effective_latency_ms"] = _nonnegative_int(
+        runtime.get("order_effective_latency_ms"), "order_effective_latency_ms"
+    )
+    runtime["quote_check_interval_ms"] = _positive_int(
+        runtime.get("quote_check_interval_ms"), "quote_check_interval_ms"
+    )
+    prepared = _prepare_mid_distance_frame(target_frame, runtime, trade_date=trade_date)
+    contract = str(prepared["contract"].iloc[0]).upper()
+    if any(_normalize_mid_direction(key) in {"BUY", "SELL"} for key in parameters):
+        selected = parameters  # type: ignore[assignment]
+    else:
+        if contract not in parameters or not isinstance(parameters[contract], Mapping):
+            raise ValueError(f"参数没有目标合约: {contract}")
+        selected = parameters[contract]  # type: ignore[assignment]
+    selected = _validate_mid_parameter_rows(selected)
+    for direction, values in selected.items():
+        instrument = str(values.get("InstrumentID") or "").strip().upper()
+        if instrument and instrument != contract:
+            raise ValueError(f"参数合约与行情不一致: {instrument}/{contract}/{direction}")
+    replay = _MidDistanceReplay(
+        prepared,
+        selected,
+        runtime,
+        trade_date=trade_date or _frame_trade_date(prepared),
+        hold_ms=int(round(hold_value * 1000)),
+        assume_sorted=True,
+    )
+    return replay.run()
+
+
+def _mid_distance_source_frames(
+    input_path: str | Path,
+    parameters: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    start_date: str,
+    end_date: str,
+    config: Mapping[str, Any],
+) -> dict[tuple[str, str], pd.DataFrame]:
+    """从 Mid 分析器的来源发现链构造合约日帧。"""
+    from src.mid_analyzer import Config as MidAnalyzerConfig
+    from src.mid_analyzer import discover_sources, prepare_group, read_source
+
+    wanted = set(parameters)
+    frames: dict[tuple[str, str], pd.DataFrame] = {}
+    discovery = discover_sources(input_path)
+    for source in discovery.selected:
+        if source.trade_date and not (start_date <= source.trade_date <= end_date):
+            continue
+        if source.contract_hint and source.contract_hint.upper() not in wanted:
+            continue
+        raw = read_source(source)
+        if raw.empty:
+            continue
+        for instrument, group in raw.groupby("InstrumentID", sort=False, dropna=False):
+            contract = str(instrument).strip().upper()
+            if contract not in wanted:
+                continue
+            date = source.trade_date or str(group["TradingDay"].iloc[0]).strip()
+            if not (start_date <= date <= end_date):
+                continue
+            prepared = prepare_group(group.reset_index(drop=True), source, MidAnalyzerConfig())
+            commodity = re.match(r"[A-Za-z]+", contract)
+            runtime = dict(config)
+            runtime.update({
+                "target_contract": contract,
+                "commodity": commodity.group(0).upper() if commodity else "",
+            })
+            prepared = _prepare_mid_distance_frame(prepared, runtime, trade_date=date)
+            frames[(contract, date)] = prepared
+    return frames
+
+
+def run_mid_distance_replay(
+    parameters_path: str | Path,
+    input_path: str | Path,
+    *,
+    start_date: str,
+    end_date: str,
+    output_dir: str | Path,
+    hold_seconds: float = 2.0,
+    contracts: Iterable[str] | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """批量运行自动选参驱动的目标合约 Mid 回放。"""
+    start = _required_date(start_date, "start_date")
+    end = _required_date(end_date, "end_date")
+    if start > end:
+        raise ValueError("start_date 不能晚于 end_date")
+    parameters = load_mid_distance_parameters(parameters_path, contracts)
+    runtime = dict(DEFAULT_CONFIG)
+    runtime.update(dict(config or {}))
+    runtime.update({"enable_hedge": False, "quote_mode": MID_DISTANCE_MODE})
+    runtime["order_effective_latency_ms"] = _nonnegative_int(
+        runtime.get("order_effective_latency_ms"), "order_effective_latency_ms"
+    )
+    runtime["quote_check_interval_ms"] = _positive_int(
+        runtime.get("quote_check_interval_ms"), "quote_check_interval_ms"
+    )
+    frames = _mid_distance_source_frames(input_path, parameters, start, end, runtime)
+    all_transitions: list[pd.DataFrame] = []
+    all_orders: list[pd.DataFrame] = []
+    all_trades: list[pd.DataFrame] = []
+    all_checks: list[pd.DataFrame] = []
+    skipped: list[dict[str, str]] = []
+    per_contract: dict[str, dict[str, pd.DataFrame]] = {
+        contract: {
+            "transitions": pd.DataFrame(columns=STATE_COLUMNS),
+            "orders": pd.DataFrame(columns=ORDER_COLUMNS),
+            "trades": pd.DataFrame(columns=TRADE_COLUMNS),
+            "quote_checks": pd.DataFrame(columns=MID_DISTANCE_CHECK_COLUMNS),
+        }
+        for contract in parameters
+    }
+    for contract in sorted(parameters):
+        for stamp in pd.date_range(start, end, freq="D"):
+            date = stamp.strftime("%Y%m%d")
+            frame = frames.get((contract, date))
+            if frame is None:
+                skipped.append({"contract": contract, "trade_date": date, "reason": "target_day_missing"})
+                continue
+            day = simulate_mid_distance_day(
+                frame,
+                parameters[contract],
+                runtime,
+                trade_date=date,
+                hold_seconds=hold_seconds,
+            )
+            all_transitions.append(day["transitions"])
+            all_orders.append(day["orders"])
+            all_trades.append(day["trades"])
+            all_checks.append(day["quote_checks"])
+            bucket = per_contract[contract]
+            for name in bucket:
+                bucket[name] = day[name].copy() if bucket[name].empty else pd.concat(
+                    [bucket[name], day[name]], ignore_index=True
+                )
+    transitions = _concat_frames(all_transitions, STATE_COLUMNS)
+    orders = _concat_frames(all_orders, ORDER_COLUMNS)
+    trades = _concat_frames(all_trades, TRADE_COLUMNS)
+    quote_checks = _concat_frames(all_checks, MID_DISTANCE_CHECK_COLUMNS)
+    return {
+        "config": {**runtime, "parameters_path": str(parameters_path), "input_path": str(input_path), "trade_date_start": start, "trade_date_end": end, "hold_seconds": hold_seconds, "output_dir": str(output_dir)},
+        "parameters": parameters,
+        "transitions": transitions,
+        "orders": orders,
+        "trades": trades,
+        "quote_checks": quote_checks,
+        "skipped_days": pd.DataFrame(skipped, columns=["contract", "trade_date", "reason"]),
+        "per_contract": per_contract,
+        "summary": build_programmatic_summary(trades, orders, transitions),
+        "warnings": [
+            "这是基于快照的 Mid 距离带回放；成交采用新增成交量与 Last 触达假设，不是交易所撮合回报。",
+            "本次不执行跨合约对冲；固定持有时间由 hold_seconds 指定。",
+            "参数 CSV 只决定报价距离；FollowRatio 和事件标签不参与在线成交或退出决策。",
+        ],
+    }
+
+
+def write_mid_distance_replay_outputs(result: Mapping[str, Any]) -> dict[str, str]:
+    """写出 Mid 距离带回放的汇总、逐笔结果、检查日志和轻量报告。"""
+    output_dir = Path(str(result["config"]["output_dir"]))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parameters = result.get("parameters", {})
+    parameter_rows = []
+    for contract, directions in parameters.items():
+        for direction, values in directions.items():
+            parameter_rows.append({"InstrumentID": contract, **dict(values)})
+    parameters_path = output_dir / "parameters_used.csv"
+    summary_path = output_dir / "replay_summary.csv"
+    trades_path = output_dir / "replay_trades.csv"
+    checks_path = output_dir / "quote_checks.csv"
+    skipped_path = output_dir / "replay_skipped_days.csv"
+    config_path = output_dir / "run_config.json"
+    report_path = output_dir / "replay_index.html"
+    pd.DataFrame(parameter_rows).to_csv(parameters_path, index=False, encoding="utf-8-sig")
+    result["summary"].to_csv(summary_path, index=False, encoding="utf-8-sig")
+    result["trades"].to_csv(trades_path, index=False, encoding="utf-8-sig")
+    result["quote_checks"].to_csv(checks_path, index=False, encoding="utf-8-sig")
+    result["skipped_days"].to_csv(skipped_path, index=False, encoding="utf-8-sig")
+    config_path.write_text(
+        json.dumps(
+            {
+                "config": dict(result["config"]),
+                "warnings": list(result.get("warnings", [])),
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    contract_links = []
+    for contract, bucket in sorted(result.get("per_contract", {}).items()):
+        contract_dir = output_dir / contract
+        contract_dir.mkdir(parents=True, exist_ok=True)
+        bucket["transitions"].to_csv(contract_dir / "quote_state_transitions.csv", index=False, encoding="utf-8-sig")
+        bucket["orders"].to_csv(contract_dir / "order_lifecycle.csv", index=False, encoding="utf-8-sig")
+        bucket["trades"].to_csv(contract_dir / "programmatic_trades.csv", index=False, encoding="utf-8-sig")
+        bucket["quote_checks"].to_csv(contract_dir / "quote_checks.csv", index=False, encoding="utf-8-sig")
+        bucket_summary = build_programmatic_summary(bucket["trades"], bucket["orders"], bucket["transitions"])
+        bucket_summary["target_contract"] = contract
+        bucket_result = {
+            "config": result["config"],
+            "warnings": result.get("warnings", []),
+            "summary": bucket_summary,
+            "trades": bucket["trades"],
+            "trade_contexts": {},
+        }
+        bucket_result["summary"].to_csv(contract_dir / "programmatic_summary.csv", index=False, encoding="utf-8-sig")
+        skipped = result.get("skipped_days", pd.DataFrame())
+        if isinstance(skipped, pd.DataFrame):
+            skipped.loc[skipped.get("contract", pd.Series(dtype=str)) == contract].to_csv(
+                contract_dir / "programmatic_skipped_days.csv", index=False, encoding="utf-8-sig"
+            )
+        (contract_dir / "run_config.json").write_text(
+            json.dumps(
+                {"config": dict(result["config"]), "warnings": list(result.get("warnings", []))},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        (contract_dir / "programmatic_report.html").write_text(
+            _render_programmatic_report(bucket_result), encoding="utf-8"
+        )
+        contract_links.append(f'<li><a href="{contract}/programmatic_report.html">{escape(contract)}</a></li>')
+    summary_html = result["summary"].to_html(index=False, border=0, escape=True)
+    report_path.write_text(
+        "<!doctype html><meta charset='utf-8'><title>Mid 距离带回放</title>"
+        "<h1>Mid 距离带回放</h1>"
+        + "<p>不对冲；按固定持有时间平目标合约。</p>"
+        + "<h2>合约报告</h2><ul>" + "".join(contract_links) + "</ul>"
+        + "<h2>汇总</h2>" + summary_html
+        + "<h2>文件</h2><ul>"
+        + f"<li><a href='{parameters_path.name}'>parameters_used.csv</a></li>"
+        + f"<li><a href='{checks_path.name}'>quote_checks.csv</a></li>"
+        + f"<li><a href='{trades_path.name}'>replay_trades.csv</a></li>"
+        + f"<li><a href='{skipped_path.name}'>replay_skipped_days.csv</a></li></ul>",
+        encoding="utf-8",
+    )
+    return {
+        "parameters": str(parameters_path),
+        "summary": str(summary_path),
+        "trades": str(trades_path),
+        "quote_checks": str(checks_path),
+        "skipped_days": str(skipped_path),
+        "config": str(config_path),
+        "report": str(report_path),
+    }
+
+
 def _fill_evidence(row: pd.Series, order: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[list[str], bool]:
     """返回被动限价的可观察成交证据；盘口量不足单独保留为未知状态。"""
     limit = float(order["price"])
@@ -1355,7 +2372,13 @@ def _fill_evidence(row: pd.Series, order: Mapping[str, Any], config: Mapping[str
     return evidence, partial_unknown
 
 
-def _quote_spread_ok(row: pd.Series, tick_size: float, config: Mapping[str, Any]) -> bool:
+def _quote_spread_ok(
+    row: pd.Series,
+    tick_size: float,
+    config: Mapping[str, Any],
+    *,
+    grid: Mapping[str, Any] | None = None,
+) -> bool:
     """目标腿只有在总触达深度严格覆盖 N 倍盘口价差时才允许报价。"""
     if tick_size <= 0 or not _quote_row_valid(row):
         return False
@@ -1364,7 +2387,18 @@ def _quote_spread_ok(row: pd.Series, tick_size: float, config: Mapping[str, Any]
     if bid is None or ask is None:
         return False
     spread_ticks = (ask - bid) / tick_size
-    total_quote_ticks = float(config["band_half_width_ticks"]) + float(config["outer_quote_offset_ticks"])
+    try:
+        if grid is not None and grid.get("W_ticks") is not None and grid.get("D_ticks") is not None:
+            total_quote_ticks = float(grid["W_ticks"]) + float(grid["D_ticks"])
+        else:
+            anchor = _valid_last_price(row)
+            if anchor is None:
+                return False
+            anchor = _round_to_tick(anchor, tick_size)
+            width_ticks, outer_ticks, _ = _grid_distance_ticks(anchor, tick_size, config)
+            total_quote_ticks = width_ticks + outer_ticks
+    except (KeyError, TypeError, ValueError):
+        return False
     return total_quote_ticks > spread_ticks * float(config["quote_spread_multiple"])
 
 
@@ -1507,7 +2541,7 @@ def _load_required_frames(config: Mapping[str, Any], trade_date: str) -> dict[st
     day_path = _resolve_tick_day_path(Path(str(config["tick_data_root"])), trade_date)
     daily_bounds = load_daily_bounds(trade_date, daily_root=str(config["daily_data_root"]))
     frames: dict[str, pd.DataFrame] = {}
-    for contract_file in iter_day_contract_files(day_path):
+    for contract_file in iter_day_contract_files(day_path, trade_date=trade_date):
         info = parse_contract_file(contract_file.file_name, None)
         if info.commodity != config["commodity"] or info.contract not in required:
             continue
@@ -1526,10 +2560,20 @@ def _resolve_tick_day_path(tick_root: Path, trade_date: str) -> Path:
         tick_root / trade_date[:6] / trade_date,
         tick_root / f"{trade_date}.zip",
         tick_root / trade_date,
+        tick_root / trade_date[:4] / f"{trade_date[:6]}.zip",
+        tick_root / f"{trade_date[:6]}.zip",
     )
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    month_archives = sorted(
+        {
+            *tick_root.glob(f"{trade_date[:6]}*.zip"),
+            *tick_root.joinpath(trade_date[:4]).glob(f"{trade_date[:6]}*.zip"),
+        }
+    )
+    if len(month_archives) == 1:
+        return month_archives[0]
     raise FileNotFoundError(f"找不到 {trade_date} 的 tick 文件")
 
 
@@ -1545,6 +2589,11 @@ def _load_event_rows(path_text: str) -> pd.DataFrame:
     missing = sorted(required - set(raw.columns))
     if missing:
         raise ValueError(f"候选事件 CSV 缺少字段: {', '.join(missing)}")
+    if "异常方向" in raw:
+        direction = raw["异常方向"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
+        if (~direction.isin(("down", "up"))).any():
+            raise ValueError("异常方向只允许 down 或 up")
+        raw = raw.loc[direction.eq("down")].copy()
     out = pd.DataFrame(
         {
             "trade_date": raw["交易日"].map(lambda value: _required_date(value, "候选事件.交易日")),
@@ -1785,9 +2834,6 @@ def _build_pre_fill_quote_rows(
     rows = _context_rows(target, fill_key - TRADE_CONTEXT_WINDOW_MS, fill_key, phases, columns)
     if not rows:
         return []
-    width = _finite_number(config.get("band_half_width_ticks"))
-    outer = _finite_number(config.get("outer_quote_offset_ticks"))
-    step = _finite_number(config.get("reanchor_step_ticks"))
     transition_frame = transitions if transitions is not None else pd.DataFrame()
     if not transition_frame.empty and "market_time_key" in transition_frame:
         transition_frame = transition_frame.sort_values("market_time_key", kind="stable").reset_index(drop=True)
@@ -1803,8 +2849,17 @@ def _build_pre_fill_quote_rows(
                 transition = transition_frame.iloc[position]
         anchor = _finite_number(transition.get("grid_anchor") if transition is not None else None)
         state = str(transition.get("to_state") or "") if transition is not None else ""
+        width = _finite_number(transition.get("W_ticks") if transition is not None else None)
+        outer = _finite_number(transition.get("D_ticks") if transition is not None else None)
+        step = _finite_number(transition.get("S_ticks") if transition is not None else None)
+        width_pct = _finite_number(transition.get("W_pct") if transition is not None else None)
+        outer_pct = _finite_number(transition.get("D_pct") if transition is not None else None)
+        step_pct = _finite_number(transition.get("S_pct") if transition is not None else None)
         row.update(
             {
+                "W_pct": width_pct,
+                "D_pct": outer_pct,
+                "S_pct": step_pct,
                 "W_ticks": width,
                 "D_ticks": outer,
                 "S_ticks": step,
@@ -1818,9 +2873,9 @@ def _build_pre_fill_quote_rows(
                 "quote_active": state in {"FLAT_QUOTING", "REPLACE_PENDING"},
             }
         )
-        if anchor is not None and tick_size is not None:
-            row["band_lower"] = _round_to_tick(anchor - float(width or 0) * tick_size, tick_size)
-            row["band_upper"] = _round_to_tick(anchor + float(width or 0) * tick_size, tick_size)
+        if anchor is not None and tick_size is not None and width is not None:
+            row["band_lower"] = _round_to_tick(anchor - width * tick_size, tick_size)
+            row["band_upper"] = _round_to_tick(anchor + width * tick_size, tick_size)
         row.pop("market_time_key", None)
     return rows
 
@@ -2106,9 +3161,9 @@ document.getElementById('modal-title').textContent=trade.trade_id;
 const phaseTimes=context.phase_times||{};
 const cfg=data.config||{};
 const hold=trade.exit_key===null||trade.exit_key===undefined?'—':((Number(trade.exit_key)-Number(trade.fill_key))/1000).toFixed(1)+' 秒';
-const cards=[['交易日',display(trade.trade_date)],['目标/对冲合约',`${trade.target_contract} / ${trade.hedge_contract||'—'}`],['W / D / S',`${number(cfg.band_half_width_ticks)} / ${number(cfg.outer_quote_offset_ticks)} / ${number(cfg.reanchor_step_ticks)} tick`],['对冲',cfg.enable_hedge?'开启':'关闭'],['价差倍数 N',number(cfg.quote_spread_multiple)],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['对冲成交价',`${trade.hedge_contract||'—'}：${number(trade.hedge_entry_price)}`],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',money(trade.target_pnl)+' / '+money(trade.hedge_pnl)],['净收益',money(trade.net_pnl)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];
+const cards=[['交易日',display(trade.trade_date)],['目标/对冲合约',`${trade.target_contract} / ${trade.hedge_contract||'—'}`],['W / D / S 百分比',`${number(cfg.band_half_width_pct)}% / ${number(cfg.outer_quote_offset_pct)}% / ${number(cfg.reanchor_step_pct)}%`],['对冲',cfg.enable_hedge?'开启':'关闭'],['价差倍数 N',number(cfg.quote_spread_multiple)],['方向',trade.direction==='long'?'买入目标':'卖出目标'],['成交分类',eventLabels[trade.event_label]||trade.event_label],['成交证据',labelEvidence(trade.fill_evidence)],['目标成交价',number(trade.target_entry_price)],['对冲成交价',`${trade.hedge_contract||'—'}：${number(trade.hedge_entry_price)}`],['目标成交',phaseTimes['目标成交']||trade.fill_time],['参考腿成交',phaseTimes['参考腿成交']||'未成交'],['退出',phaseTimes['退出']||'未退出'],['持仓时长',hold],['退出原因',exitLabels[trade.exit_reason]||trade.exit_reason||'—'],['状态',statusLabels[trade.status]||trade.status],['目标/对冲盈亏',money(trade.target_pnl)+' / '+money(trade.hedge_pnl)],['净收益',money(trade.net_pnl)],['未对冲最差',money(trade.unhedged_worst_mark_pnl)],['对冲后最差',money(trade.hedged_worst_mark_pnl)]];
 document.getElementById('modal-cards').innerHTML=cards.map(([k,v])=>'<div class="card"><span>'+k+'</span><strong>'+v+'</strong></div>').join('');
-const quoteColumns=[['关键时点','关键时点'],['display_time','更新时间'],['W_ticks','W（tick）'],['D_ticks','D（tick）'],['S_ticks','S（tick）'],['fair_price','合理价'],['fair_price_reliable','合理价可靠'],['grid_anchor','报价锚点'],['band_lower','合理价带下限'],['band_upper','合理价带上限'],['buy_limit','买入挂单价'],['sell_limit','卖出挂单价'],['quote_state','报价状态'],['quote_reason','状态原因'],['quote_active','报价有效'],['LastPrice','最新成交价'],['interval_vwap','区间成交均价'],['BidPrice1','买一价'],['AskPrice1','卖一价']];
+const quoteColumns=[['关键时点','关键时点'],['display_time','更新时间'],['W_pct','W（%）'],['D_pct','D（%）'],['S_pct','S（%）'],['W_ticks','W（tick）'],['D_ticks','D（tick）'],['S_ticks','S（tick）'],['fair_price','合理价'],['fair_price_reliable','合理价可靠'],['grid_anchor','报价锚点'],['band_lower','合理价带下限'],['band_upper','合理价带上限'],['buy_limit','买入挂单价'],['sell_limit','卖出挂单价'],['quote_state','报价状态'],['quote_reason','状态原因'],['quote_active','报价有效'],['LastPrice','最新成交价'],['interval_vwap','区间成交均价'],['BidPrice1','买一价'],['AskPrice1','卖一价']];
 let content='<h2>成交前 10 秒报价计算</h2>'+contextTable(context.pre_fill_quote_rows||[],quoteColumns)+'<h2>交易全流程</h2>'+flowTableEnhanced(context.flow_events||[])+'<h2>目标合约快照</h2><p class="muted">完整持仓窗口：'+display(context.window.start_time)+' 至 '+display(context.window.end_time)+'（目标成交前 '+number(context.window.before_after_ms/1000)+' 秒至退出后 '+number(context.window.before_after_ms/1000)+' 秒）</p>'+contextTable(context.target_rows,targetColumns,true);
 Object.entries(context.contracts||{}).forEach(([code,part])=>{content+='<h3 class="contract-title">'+code+' <span class="muted">'+(part.roles||[]).join(' / ')+'</span></h3>'+contextTable(part.rows||[],referenceColumns)});
 document.getElementById('modal-content').innerHTML=content;

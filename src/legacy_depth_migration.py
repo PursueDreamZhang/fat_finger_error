@@ -31,11 +31,18 @@ def _number(value: object) -> float | None:
 
 def _derive_row(row: pd.Series) -> tuple[float | None, str, str]:
     values = {column: _number(row.get(column)) for column in RECONSTRUCTION_COLUMNS}
-    if any(value is None for value in values.values()):
-        return None, "legacy_depth_unverifiable", ""
-    visible_hit = values["末笔向下偏离_跳"] >= values["末笔触发阈值_跳"]
+    # The event-level trigger reason is a union over a merged event window, so
+    # channel membership must be reconstructed from the anchor-row numbers.
+    visible_hit = (
+        values["末笔向下偏离_跳"] is not None
+        and values["末笔触发阈值_跳"] is not None
+        and values["末笔向下偏离_跳"] >= values["末笔触发阈值_跳"]
+    )
     interval_hit = (
-        values["区间均价向下偏离_跳"] >= values["区间均价触发阈值_跳"]
+        values["区间均价向下偏离_跳"] is not None
+        and values["区间均价触发阈值_跳"] is not None
+        and values["区间均价向下偏离_跳"] >= values["区间均价触发阈值_跳"]
+        and values["一秒合并均价向下偏离_跳"] is not None
         and values["一秒合并均价向下偏离_跳"] >= values["区间均价触发阈值_跳"]
     )
     depths = []
@@ -61,6 +68,16 @@ def migrate_legacy_depth(input_path: str | Path, output_dir: str | Path = DEFAUL
     missing_annotation = [column for column in ("交易日", "事件编号", "品种", "日线边界判定") if column not in events.columns]
     if missing_annotation:
         raise ValueError(f"输入必须是规范注释 CSV，缺少字段：{', '.join(missing_annotation)}")
+    if "异常方向" not in events:
+        events["异常方向"] = "down"
+    else:
+        direction = events["异常方向"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
+        if (~direction.isin(("down", "up"))).any():
+            raise ValueError("异常方向只允许 down 或 up")
+        events["异常方向"] = direction
+    input_event_count = len(events)
+    skipped_up_event_count = int(events["异常方向"].eq("up").sum())
+    events = events.loc[events["异常方向"].eq("down")].copy()
     for column in RECONSTRUCTION_COLUMNS:
         if column not in events.columns:
             events[column] = ""
@@ -81,12 +98,13 @@ def migrate_legacy_depth(input_path: str | Path, output_dir: str | Path = DEFAUL
         return depth * tick_size / fair * 10000
 
     output["事件确认深度_基点"] = output.apply(bps, axis=1)
-    output["迁移规则版本"] = "legacy_components_v1"
+    output["迁移规则版本"] = "legacy_components_v2_channel_aware"
     output_dir.mkdir(parents=True, exist_ok=True)
     output.to_csv(output_path, index=False, encoding="utf-8-sig")
     return {
         "output_path": output_path,
-        "input_event_count": len(events),
+        "input_event_count": input_event_count,
+        "skipped_up_event_count": skipped_up_event_count,
         "derived_event_count": int(output["确认深度来源"].eq("legacy_components_derived").sum()),
         "unverifiable_event_count": int(output["确认深度来源"].eq("legacy_depth_unverifiable").sum()),
     }

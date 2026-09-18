@@ -31,7 +31,7 @@ def _write_source(tmp_path, rows):
 def test_migration_uses_only_actual_hit_channels_and_derives_bps(tmp_path):
     rows = [
         BASE,
-        {**BASE, "事件编号": "E2", "末笔向下偏离_跳": 3, "区间均价向下偏离_跳": 20, "一秒合并均价向下偏离_跳": 25},
+        {**BASE, "事件编号": "E2", "触发原因": "interval_execution_drop", "末笔向下偏离_跳": 3, "区间均价向下偏离_跳": 20, "一秒合并均价向下偏离_跳": 25},
         {**BASE, "事件编号": "E3", "末笔向下偏离_跳": 10, "区间均价向下偏离_跳": 30, "一秒合并均价向下偏离_跳": 5},
         {**BASE, "事件编号": "E4", "末笔向下偏离_跳": 3, "区间均价向下偏离_跳": 5, "一秒合并均价向下偏离_跳": 4},
     ]
@@ -45,11 +45,28 @@ def test_migration_uses_only_actual_hit_channels_and_derives_bps(tmp_path):
     assert float(output.loc[0, "事件确认深度_基点"]) == pytest.approx(62.5)
 
 
-def test_missing_combined_vwap_is_unverifiable_and_source_is_not_overwritten(tmp_path):
+def test_visible_channel_does_not_require_combined_vwap(tmp_path):
     source = _write_source(tmp_path, [{**BASE, "一秒合并均价向下偏离_跳": ""}])
     result = migrate_legacy_depth(source, tmp_path / "out")
-    assert result["unverifiable_event_count"] == 1
+    output = pd.read_csv(result["output_path"], encoding="utf-8-sig", keep_default_na=False)
+    assert result["derived_event_count"] == 1
+    assert result["unverifiable_event_count"] == 0
+    assert output.loc[0, "事件确认深度_跳"] == 10
+    assert output.loc[0, "确认深度命中通道"] == "visible"
     assert source.resolve() != result["output_path"].resolve()
+
+
+def test_interval_channel_still_requires_combined_vwap(tmp_path):
+    source = _write_source(tmp_path, [{
+        **BASE,
+        "触发原因": "interval_execution_drop",
+        "末笔向下偏离_跳": 3,
+        "一秒合并均价向下偏离_跳": "",
+    }])
+    result = migrate_legacy_depth(source, tmp_path / "out")
+    output = pd.read_csv(result["output_path"], encoding="utf-8-sig", keep_default_na=False)
+    assert result["unverifiable_event_count"] == 1
+    assert output.loc[0, "事件确认深度_跳"] == ""
 
 
 def test_migrated_csv_satisfies_generator_contract(tmp_path):
@@ -58,3 +75,14 @@ def test_migrated_csv_satisfies_generator_contract(tmp_path):
     events = load_events(result["output_path"])
     assert events.loc[0, "事件确认深度_跳"] == 10
     assert events.loc[0, "确认深度来源"] == "legacy_components_derived"
+
+
+def test_migration_skips_up_events_and_rejects_invalid_direction(tmp_path):
+    source = _write_source(tmp_path, [{**BASE, "异常方向": "up"}, {**BASE, "事件编号": "E2", "异常方向": "down"}])
+    result = migrate_legacy_depth(source, tmp_path / "out")
+    output = pd.read_csv(result["output_path"], encoding="utf-8-sig")
+    assert result["skipped_up_event_count"] == 1
+    assert output["事件编号"].tolist() == ["E2"]
+    bad = _write_source(tmp_path, [{**BASE, "异常方向": "sideways"}])
+    with pytest.raises(ValueError, match="异常方向"):
+        migrate_legacy_depth(bad, tmp_path / "out2")

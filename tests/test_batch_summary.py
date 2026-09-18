@@ -41,6 +41,7 @@ def test_batch_summary_distinguishes_hits_empty_failed_and_missing(tmp_path):
     assert payload["counts"] == {
         "total": 4, "completed": 3, "running": 0, "hit": 1,
         "failed": 1, "unfinished": 1, "event_count": 1,
+        "down_event_count": 1, "up_event_count": 0,
     }
     assert "检测到疑似候选事件" in html
     assert "正常完成，无候选事件" in html
@@ -72,6 +73,21 @@ def test_hits_are_sorted_by_event_count_and_combined(tmp_path):
     assert len(combined) == 3
 
 
+def test_batch_summary_counts_directions_and_uses_directional_maxima(tmp_path):
+    init_batch(tmp_path, "day", ["AU"], "start")
+    _write_events(tmp_path, "AU", [
+        {"品种": "AU", "合约": "AU1", "异常方向": "down", "末笔向下偏离_跳": 12},
+        {"品种": "AU", "合约": "AU1", "异常方向": "up", "末笔向上偏离_跳": 30},
+    ])
+    mark_finished(tmp_path, "AU", "start", "end", 1, 0)
+    payload = finalize_batch(tmp_path, "end", 2)
+    status = payload["commodities"][0]
+    assert payload["counts"]["down_event_count"] == 1
+    assert payload["counts"]["up_event_count"] == 1
+    assert status["max_down_ticks"] == 12
+    assert status["max_up_ticks"] == 30
+
+
 def test_running_transition_and_bad_or_empty_csv_do_not_crash(tmp_path):
     init_batch(tmp_path, "day", ["AU", "JD"], "start")
     mark_running(tmp_path, "AU", "start")
@@ -87,6 +103,19 @@ def test_running_transition_and_bad_or_empty_csv_do_not_crash(tmp_path):
     payload = finalize_batch(tmp_path, "end", 2)
     assert payload["counts"]["completed"] == 2
     assert (tmp_path / "batch_summary.html").exists()
+
+
+def test_finalize_keeps_empty_source_csv_headers(tmp_path):
+    init_batch(tmp_path, "day", ["AU"], "start")
+    _write_events(tmp_path, "AU", [])
+    pd.DataFrame(columns=["品种", "异常方向", "末笔向上偏离_跳"]).to_csv(
+        tmp_path / "AU" / "tick_candidate_events.csv", index=False
+    )
+    mark_finished(tmp_path, "AU", "start", "end", 1, 0)
+    finalize_batch(tmp_path, "end", 2)
+    assert pd.read_csv(tmp_path / "tick_candidate_events.csv").columns.tolist() == [
+        "品种", "异常方向", "末笔向上偏离_跳"
+    ]
 
 
 def test_clean_commodity_output_removes_only_generated_files(tmp_path):

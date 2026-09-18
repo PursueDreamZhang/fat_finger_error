@@ -1,0 +1,75 @@
+{
+  "output_dir": "output/programmatic_grid_AP510_20250605_20251005_W44_W31_L03",
+  "fair_cache_dir": "output/programmatic_grid_AP510_202506_202510_W44_D66_S44/fair_cache",
+  "base": {
+    "tick_data_root": "data/tick2011-2025",
+    "daily_data_root": "data/1d_futures",
+    "trade_date_start": "20250605",
+    "trade_date_end": "20251005",
+    "events_csv": "",
+    "quality_exclusions": [],
+    "detector_event_window_ms": 1000,
+    "account_equity": 100000,
+    "max_margin_ratio": 0.3,
+    "default_margin_rate": 0.1,
+    "margin_rate_by_commodity": {
+      "AP": 0.1
+    },
+    "default_commission_per_lot_per_side": 0,
+    "commission_by_commodity": {
+      "AP": 0
+    },
+    "target_lots": 1,
+    "hedge_lots": 1,
+    "enable_hedge": false,
+    "quote_spread_multiple": 2,
+    "max_order_actions_per_minute": 20,
+    "max_quote_age_ms": 3000,
+    "max_fair_age_ms": 3000,
+    "max_data_gap_ms": 3000,
+    "fill_model": "observable_cross_assumed",
+    "require_top_of_book_full_lot": true,
+    "cooldown_ms": 1000
+  },
+  "instruments": [
+    {
+      "name": "AP510",
+      "commodity": "AP",
+      "target_contract": "AP510",
+      "fair_reference_contracts": [
+        "AP511",
+        "AP512"
+      ],
+      "hedge_contract": "AP511"
+    }
+  ],
+  "quote_shapes": [
+    {
+      "W": 44,
+      "D": 66,
+      "S": 44
+    },
+    {
+      "W": 31,
+      "D": 46,
+      "S": 31
+    }
+  ],
+  "latency_profiles": [
+    {
+      "reanchor_confirm_ms": 1000,
+      "resume_confirm_ms": 2000,
+      "cancel_ack_latency_ms": 1000,
+      "new_order_ack_latency_ms": 1000,
+      "hedge_submit_latency_ms": 2000,
+      "max_hedge_wait_ms": 5000
+    }
+  ],
+  "min_fills": 3,
+  "min_event_fills": 1,
+  "max_normal_move_fill_rate": 0.25,
+  "max_hedge_failure_rate": 0.1,
+  "max_daily_loss": 500,
+  "max_peak_order_actions_per_minute": 20,
+  "context_mode": "none"
+}

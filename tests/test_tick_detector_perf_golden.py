@@ -209,6 +209,9 @@ def test_slow_jd_enriched_and_event_outputs_match_golden(tmp_path):
 
     output_dir = tmp_path / "jd-20260520"
     run_detection(tick_day_path=str(JD_REAL_DATA_PATH), commodities="JD", output_dir=str(output_dir))
-    assert _event_digest(output_dir / "tick_candidate_events.csv") == json.loads(
-        (FIXTURES / "golden_jd_events.json").read_text(encoding="utf-8")
-    )["digest"]
+    event_golden = json.loads((FIXTURES / "golden_jd_events.json").read_text(encoding="utf-8"))
+    events_path = output_dir / "tick_candidate_events.csv"
+    assert _event_digest(events_path) == event_golden["digest"]
+    events = pd.read_csv(events_path)
+    down_events = events.loc[events.get("异常方向", pd.Series("down", index=events.index)).eq("down")]
+    assert len(down_events) == event_golden["down_event_count"]

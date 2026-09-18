@@ -266,7 +266,7 @@ def run_manual_simulation(config: Mapping[str, Any]) -> dict[str, Any]:
     config = normalize_manual_simulation_config(config)
     scenarios, skipped_invalid_timing = build_scenarios(config)
     events, excluded_events = _load_selected_events(config)
-    warnings = _build_warnings(config, skipped_invalid_timing, len(events))
+    warnings = _build_warnings(config, skipped_invalid_timing, len(events), excluded_events)
     records: list[dict[str, Any]] = []
 
     for (trade_date, commodity), day_events in events.groupby(["__trade_date", "__commodity"], sort=True):
@@ -619,6 +619,18 @@ def _load_selected_events(config: Mapping[str, Any]) -> tuple[pd.DataFrame, pd.D
     if config["trade_date_end"]:
         selected = selected.loc[selected["__trade_date"] <= config["trade_date_end"]]
 
+    if "异常方向" not in selected:
+        selected["__event_direction"] = "down"
+    else:
+        direction = selected["异常方向"].astype("string").str.strip().str.lower().replace("", "down").fillna("down")
+        if (~direction.isin(("down", "up"))).any():
+            raise ValueError("异常方向只允许 down 或 up")
+        selected["__event_direction"] = direction
+    excluded_direction = selected.loc[selected["__event_direction"].eq("up")].copy()
+    if not excluded_direction.empty:
+        excluded_direction["exclusion_reason"] = "unsupported_event_direction_up"
+    selected = selected.loc[selected["__event_direction"].eq("down")].copy()
+
     exclusion_set = {(item["trade_date"], item["commodity"]) for item in config["quality_exclusions"]}
     exclusion_mask = selected.apply(
         lambda row: (str(row["__trade_date"]), str(row["__commodity"])) in exclusion_set,
@@ -628,6 +640,7 @@ def _load_selected_events(config: Mapping[str, Any]) -> tuple[pd.DataFrame, pd.D
     if not excluded.empty:
         excluded["exclusion_reason"] = "quality_exclusion"
     selected = selected.loc[~exclusion_mask].copy()
+    excluded = pd.concat([excluded_direction, excluded], ignore_index=True)
     sort_columns = ["__trade_date"] + (["事件时间"] if "事件时间" in selected.columns else []) + ["__event_id"]
     selected = selected.sort_values(sort_columns, kind="stable")
     if config["max_events"] is not None:
@@ -1090,7 +1103,9 @@ def _floor_to_tick(price: float, tick_size: float) -> float:
     return round(math.floor((price / tick_size) + 1e-9) * tick_size, 10)
 
 
-def _build_warnings(config: Mapping[str, Any], skipped_invalid_timing: int, event_count: int) -> list[str]:
+def _build_warnings(
+    config: Mapping[str, Any], skipped_invalid_timing: int, event_count: int, excluded_events: pd.DataFrame | None = None
+) -> list[str]:
     warnings = [
         "这是事件条件回放：每条候选事件都假定订单在事件前已挂出；它不等于全天静态挂单的真实成交率回测。",
         "快照数据不能还原排队位置、可成交数量和撤单竞争；event_fill 仅表示该成交模型下存在触及证据。",
@@ -1105,6 +1120,11 @@ def _build_warnings(config: Mapping[str, Any], skipped_invalid_timing: int, even
         warnings.append("当前手续费全部为 0，仅适合结构验证；投入真实费率后再看净收益。")
     if skipped_invalid_timing:
         warnings.append(f"已跳过 {skipped_invalid_timing} 个 exit_delay < hedge_delay 的不可执行参数组合。")
+    excluded_up_count = 0 if excluded_events is None else int(
+        excluded_events.get("exclusion_reason", pd.Series(dtype=str)).eq("unsupported_event_direction_up").sum()
+    )
+    if excluded_up_count:
+        warnings.append(f"当前手工回放仅支持向下事件，已排除 {excluded_up_count} 条向上事件。")
     if event_count == 0:
         warnings.append("筛选后没有候选事件，请检查品种、日期和质量排除参数。")
     return warnings

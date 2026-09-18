@@ -44,9 +44,11 @@
 ```
 run_detection()                              # run_tick_detector.py，按品种→按目标合约循环
   ├─ prepare_contract_snapshots(raw)         # tick_io：生成 market_time_key、合并同键、delta_volume/turnover、interval_vwap、session、开盘保护
-  ├─ select_reference_contracts(day_frames)  # 同品种成交量前 5 作为参考(peer)
+  ├─ 目标资格门槛                          # 目标外少于 3 个真实同品种合约 → 直接跳过
+  ├─ select_reference_contracts(day_frames)  # 同品种成交量前 5 候选，前三用于有效性门槛
   ├─ attach_fair_price_metrics(target, peers)# reference_selection：
   │     ├─ Pass 1：逐行 fair_price（peer asof mid + basis 滑动中位数）
+  │     │          至少 2 个有效 peer，且至少命中成交量前三中的 1 个
   │     └─ Pass 2：[t-300s, t-10s] 噪声历史 → last/vwap 阈值
   ├─ detect_candidate_ticks(enriched)        # event_detection：visible/interval 双通道 + onset 突发性
   ├─ merge_candidates(candidates, enriched)  # 10s 内同合约候选合并，取深度最大者为锚点
@@ -94,14 +96,20 @@ CLI 参数：`--tick-day-path`（必填）、`--commodity` / `--commodities`（�
 ### 5.2 全品种并行跑批（B 方案，跑整天用这个）
 
 ```bash
-# 用法: scripts/run_day_parallel.sh <tick_day_path> [并行度，默认 8]
-bash scripts/run_day_parallel.sh data/tick2026/202605/20260520 8
+# 用法：scripts/run_day_parallel.sh <tick_day_path> [总进程预算=10] [品种内进程数=2]
+#      [--commodities AU,AG] [--output-root output]
+bash scripts/run_day_parallel.sh data/tick2026/202605/20260520 10 2
+
+# 只跑指定品种，并把结果写到独立目录
+bash scripts/run_day_parallel.sh \
+  data/tick2026/202605/20260520 10 2 \
+  --commodities AU,AG --output-root output
 ```
 
-- 自动算出该目录下 validated∩present 的品种，`xargs -P 8` 每品种一个独立进程（绕开 GIL）。
+- 自动算出该目录下 validated∩present 的品种；总进程预算由 `xargs` 控制，品种内目标合约由 `target_workers` 控制。
 - 默认带 `--only-with-events`：**只有命中事件的品种才出 HTML/CSV**，空品种目录跑完自动清掉。
-- 输出在 `output/<day>-par/`：每个有事件的品种一个子目录（`event_replay_{品种}.html` + `tick_candidate_events.csv`），外加根目录合并好的 `tick_candidate_events.csv`。
-- 10 核 M4 / 32GB：一整天（81 品种）约 **24 分钟**（单进程串行要 2.5–3 小时，约 7× 加速）。
+- 输出在 `<output-root>/<day>-par/`：每个有事件的品种一个子目录（`event_replay_{品种}.html` + `tick_candidate_events.csv`），根目录还有合并 CSV、`batch_status.json`、`batch_summary.html` 和各品种日志。
+- `--tick-day-path` 支持解压目录或同名 `.zip` 文件。
 
 ### 5.3 测试
 
@@ -135,6 +143,7 @@ PYTHONPATH=. ./venv/bin/python scripts/profile_tick_detector.py \
 - **CSV 末尾写一次**：全部品种跑完后合并写 `tick_candidate_events.csv`（单品种进程时 = 该品种自己的事件）。
 - 单品种时额外复制一份 `event_replay.html`（冗余，和 `event_replay_{品种}.html` 相同）。
 - `--only-with-events`：品种 0 事件 → 跳过其 HTML；全部 0 事件 → 跳过 CSV。
+- 若某品种当天有效真实合约少于 4 个（目标自身加至少 3 个其他合约），该品种所有目标直接跳过；这不是“无事件”，而是未满足参考合约前置条件。
 
 CSV 列定义在 [run_tick_detector.py](run_tick_detector.py) 的 `CSV_COLUMNS`（中英文映射）。HTML 列定义在 [report_html.py](src/tick_detector/report_html.py) 的几个 `*_COLUMNS` 常量。
 
@@ -151,6 +160,8 @@ CSV 列定义在 [run_tick_detector.py](run_tick_detector.py) 的 `CSV_COLUMNS`�
 - **并行必须用进程，不能用线程**：Pass 1/2 是逐行 Python 循环，线程会被 GIL 串起来几乎不加速。B 方案用 `xargs -P`（多进程）才有 ~7×。
 - **`scripts/` 下脚本要 `PYTHONPATH=.`**（它们 import 根目录的 `run_tick_detector` / `src`）。
 - **未审核品种**：`--commodity` 指定未 validated 品种会 `raise ValueError`；B 脚本已自动过滤成 validated∩present，直接给整目录即可。
+- **参考合约门槛**：先按目标之外的全天成交量取前 5 个候选；每个时点最终有效 peer 必须至少 2 个，且至少有 1 个属于候选中的成交量前三，否则该行标记 `insufficient_peers`，不生成 `fair_price` 或候选事件。
+- **参考价新鲜度**：peer 的 as-of 快照默认必须在目标时刻前 `3s` 内；该限制同时影响合理价和恢复计算。
 - **数值口径**：「N 跳」= N 个最小变动价位（tick_size）。`末笔向下偏离_跳 = (fair_price − LastPrice)/tick_size`，`区间均价向下偏离_跳 = (fair_price − interval_vwap)/tick_size`。阈值（`*_threshold_ticks`）也是按跳算，与偏离同单位直接可比。
 
 ---
@@ -163,7 +174,7 @@ CSV 列定义在 [run_tick_detector.py](run_tick_detector.py) 的 `CSV_COLUMNS`�
 
 ---
 
-## 9. 当前进度（截至 2026-07-17）
+## 9. 当前进度（截至 2026-08-03）
 
 **性能优化计划**（[plan](docs/superpowers/plans/2026-07-15-tick-detector-performance-optimization-reviewed.md)）：
 - 阶段 1–4 已完成：`tick_io`（market_time_key / 开盘保护 / 同键合并 / 差分数组化）+ `reference_selection`（peer asof searchsorted、Pass 2 噪声向量化、Pass 1 输出预分配）。**JD 端到端 3.8×（~146s→~38s），零输出差异**。
@@ -174,6 +185,7 @@ CSV 列定义在 [run_tick_detector.py](run_tick_detector.py) 的 `CSV_COLUMNS`�
 **已落地的工程改动**：
 - B 方案并行跑批脚本 [scripts/run_day_parallel.sh](scripts/run_day_parallel.sh)（日常跑全天用这个）。
 - `--only-with-events` flag（无事件品种不输出）。
+- 参考合约门槛：目标外至少 3 个真实合约、至少 2 个有效 peer，且有效 peer 命中成交量前三。
 - HTML 口径调整（见第 6 节）。
 
 **已有结果**：20260515 / 20260518 / 20260519 / 20260520 四个交易日有完整 81 品种检测结果（`output/<day>-par/` 或 `output/full-<day>-experimental-81*/`）。每天约 200–270 个候选事件、命中 21–23 个品种。
@@ -186,3 +198,28 @@ CSV 列定义在 [run_tick_detector.py](run_tick_detector.py) 的 `CSV_COLUMNS`�
 - **调检测参数**：阈值/窗口常量在 `reference_selection.py` 和 `event_detection.py` 顶部（`BASELINE_WINDOW_SECONDS=300`、`NOISE_K=8`、`MAX_REFERENCE_AGE_SECONDS=3`、`MERGE_WINDOW_SECONDS=10` 等）。改完**必须**跑 golden 测试确认是否需要重录 fixtures。
 - **加 HTML 列**：同时改 `report_html.py` 的 `*_COLUMNS` 和 `run_tick_detector.py` 里对应 `_build_*` 的字段列表（两边要对齐）。
 - **新一个品种上线**：在 `COMMODITY_PROFILES`（tick_io.py）补 `tick_size` / `contract_multiplier` / `validation_status="validated"`，并用真数据跑 golden 比对。
+
+## 11. 交给其他 AI 的最短执行流程
+
+1. 确认输入是某一个交易日的全市场 tick 目录或 `.zip`，不要只提供目标合约文件；参考合约必须同时加载。
+2. 先跑单合约验证：
+
+   ```bash
+   PYTHONPATH=. ./venv/bin/python run_tick_detector.py \
+     --tick-day-path data/tick2026/YYYYMM/YYYYMMDD \
+     --commodity AU --contract AU2606 \
+     --output-dir output/ai-check-AU2606
+   ```
+
+3. 先查看 `event_replay.html` 的“合约运行诊断”和“候选事件总览”，再打开事件详情；没有事件时先区分“参考合约不足 / 历史噪声不足 / 确实无候选”。
+4. 批量任务使用 `scripts/run_day_parallel.sh`，必须给新的 `--output-root`，不要覆盖已有复盘结果。
+5. 任何结果都只能称为“疑似候选事件”；不能直接表述为交易所已经确认的乌龙指。
+
+## 12. 当前检测方向与下游边界（v2）
+
+- 当前主检测器版本为 `aggregated-tick-v2`：`detect_candidate_ticks(..., return_marked=True)` 先生成完整双向标记帧，`extract_candidate_ticks()` 再按 `event_direction=down/up` 展开候选，随后按方向独立合并与恢复。
+- CSV、单品种复盘 HTML 和全日批量汇总同时统计 `down` 与 `up`。向下偏离沿用旧字段；新增向上末笔/区间/一秒合并偏离、卖一恢复秒数和名义成交额超额。机器方向值固定为 `down`、`up`。
+- 同一时间键若末笔和区间均价分别命中相反方向，会输出两个事件；不能因相同时间键互相覆盖。
+- 恢复判断中向下检查 `BidPrice1`，向上检查 `AskPrice1`；合理价、peer 新鲜度、冻结 basis 和 3 秒/10 秒窗口不变。
+- 低侧的参数生成、手工回放、程序化单次/网格回放、旧确认深度迁移会校验方向，只处理 `down`。旧 CSV 缺少 `异常方向` 时按历史兼容为 `down`；非法非空方向会报错，手工回放的 `up` 会写入排除清单。
+- Mid + LastPrice 分析器和日线初筛不属于这条主检测链，本次没有修改。

@@ -176,7 +176,7 @@ class ContractInfo:
     trade_date: str | None
 
 
-def iter_day_contract_files(tick_day_path: str | Path) -> Iterable[ContractFile]:
+def iter_day_contract_files(tick_day_path: str | Path, trade_date: str | None = None) -> Iterable[ContractFile]:
     path = Path(tick_day_path)
     if path.is_dir():
         for file_path in sorted(path.glob("*.csv")):
@@ -189,6 +189,8 @@ def iter_day_contract_files(tick_day_path: str | Path) -> Iterable[ContractFile]
     if path.is_file() and path.suffix.lower() == ".zip":
         with zipfile.ZipFile(path) as zf:
             names = sorted(name for name in zf.namelist() if name.lower().endswith(".csv"))
+        if trade_date:
+            names = [name for name in names if Path(name).name.lower().endswith(f"_{trade_date}.csv")]
         for name in names:
             yield ContractFile(
                 file_name=Path(name).name,
