@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.mid_analyzer import Config, Source, SourceDiscovery, analyze_sources, discover_sources, prepare_group
+from src.mid_analyzer import Config, Source, SourceDiscovery, analyze_sources, csv_columns, discover_sources, prepare_group
 from src.mid_analyzer_report import render_report_html
 
 
@@ -51,6 +51,15 @@ def test_same_second_raw_and_strict_keep_representative_and_anchor(tmp_path):
     assert strict["recovery_ratio_1s"] == 1
     assert bool(strict["mfe_mae_window_complete"])
     assert result.windows[strict["window_id"]][2]["is_representative"] is True
+
+
+def test_default_recovery_outputs_only_1_3_5_seconds():
+    cfg = Config()
+    assert cfg.horizons == (1, 3, 5)
+    assert cfg.mfe_mae_horizon == 5
+    columns = csv_columns(cfg)
+    assert "recovery_ratio_5s" in columns["event"]
+    assert not any("_10s" in column or "_30s" in column or "_60s" in column for column in columns["event"])
 
 
 def test_no_new_trade_and_outside_bbo_rule(tmp_path):
@@ -122,3 +131,5 @@ def test_report_is_standalone_and_handles_empty_events():
     assert "Mid + LastPrice 异常检测报告" in html
     assert "<dialog" in html and "function draw" in html
     assert "JSON.parse" in html
+    assert "60秒完整" not in html
+    assert "mfeMaeHorizon" in html

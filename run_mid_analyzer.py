@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-merge-seconds", type=_positive_float, default=5.0, help="候选合并窗口，默认 5 秒")
     parser.add_argument("--session-gap-seconds", type=_positive_float, default=300.0, help="时段断点阈值，默认 300 秒")
     parser.add_argument("--sample-delay-tolerance", type=_positive_float, default=1.0, help="恢复取样允许晚到秒数，默认 1 秒")
-    parser.add_argument("--mfe-mae-horizon", type=_positive_int, default=60, help="MFE/MAE 观察窗口，默认 60 秒")
+    parser.add_argument("--mfe-mae-horizon", type=_positive_int, default=5, help="MFE/MAE 观察窗口，默认 5 秒")
     return parser
 
 

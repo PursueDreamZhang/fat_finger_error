@@ -26,7 +26,7 @@ from src.tick_detector.tick_io import CONTINUOUS_KEYWORDS, CONTRACT_RE, normaliz
 
 MODEL_VERSION = "mid-last-v1"
 DEFAULT_THRESHOLDS = (0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.02, 0.025, 0.03)
-DEFAULT_HORIZONS = (1, 3, 5, 10, 30, 60)
+DEFAULT_HORIZONS = (1, 3, 5)
 REQUIRED_COLUMNS = (
     "TradingDay",
     "InstrumentID",
@@ -48,7 +48,7 @@ class Config:
     event_merge_seconds: float = 5.0
     session_gap_seconds: float = 300.0
     sample_delay_tolerance: float = 1.0
-    mfe_mae_horizon: int = 60
+    mfe_mae_horizon: int = 5
     window_before_seconds: float = 30.0
 
 
