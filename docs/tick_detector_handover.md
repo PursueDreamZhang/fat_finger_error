@@ -1,6 +1,7 @@
 # 聚合 Tick 乌龙指候选检测器 — 代码交接文档
 
 > 本文档面向接手继续开发/跑批的人（或新会话），描述**当前实际生效的实现**：代码在哪、怎么跑、输出什么、当前进度到哪。
+> 若只需理解模型、判定与日常使用，请先读 [主 Tick 乌龙指候选检测器：模型与使用说明](main_tick_detector_model_and_usage.md)。
 > 算法口径（fair_price、噪声阈值、双通道、恢复规则等）的推导见设计文档，本文不重复：
 > - [docs/superpowers/specs/2026-07-10-aggregated-tick-fat-finger-detector-design.md](docs/superpowers/specs/2026-07-10-aggregated-tick-fat-finger-detector-design.md)（主设计）
 > - [docs/superpowers/plans/2026-07-15-tick-detector-performance-optimization-reviewed.md](docs/superpowers/plans/2026-07-15-tick-detector-performance-optimization-reviewed.md)（性能优化计划）

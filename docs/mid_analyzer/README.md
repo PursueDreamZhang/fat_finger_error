@@ -1,5 +1,7 @@
 # Mid + LastPrice 异常检测
 
+> 若需完整理解计算模型、候选判定、恢复口径和适用边界，请先读 [Mid + LastPrice 检测器：模型与使用说明](model_and_usage.md)。
+
 该模块针对原始 tick 快照，使用新增成交时的 `LastPrice` 与一档盘口中价
 `(BidPrice1 + AskPrice1) / 2` 的偏离筛查疑似孤立异常成交。它不使用
 `Turnover`、`AveragePrice` 或 `interval_vwap`，因此适合检查这些累计字段不可靠的品种。
